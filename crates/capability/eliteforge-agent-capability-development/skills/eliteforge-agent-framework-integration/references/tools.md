@@ -23,22 +23,32 @@ let selection = AgentSelection {
 
 | 模型工具 | 使用方法 | 返回值需要检查什么 |
 | --- | --- | --- |
-| `fs_read_text` | 传文件相对路径 | 读取范围、截断信息、`version` |
-| `search_grep` / `search_glob` / `search_path` | 传查询及根内范围；有 `nextCursor` 可续页 | `complete`、`limitReason`、`truncated` |
-| `fs_write_text` / `fs_apply_patch` | 修改已有文件时传读取所得 `expectedVersion` | 变更前后版本与 diff |
-| `fs_apply_unified_patch` | 先 `dryRun: true`，再同参数正式提交 | 每个路径的预期版本与失败状态 |
+| `fs_read_text` | `items: [{path, startLine?, endLine?, maxBytes?}]`，单项也用数组 | 实际返回范围、截断与内容；附件不授予工作区编辑凭证 |
+| `fs_write_text` | `items: [{path, content, mode}]`；mode 必填 create/overwrite/append | 按输入顺序的逐项结果；独立批量允许部分成功 |
+| `fs_apply_patch` | `mode: text` 配合 path/oldText/newText，或 `mode: patch` 配合 Begin Patch 内容 | status、受影响路径、diff 和冲突原因 |
+| `search_grep` / `search_glob` / `search_path` | 传查询及根内范围；有 nextCursor 可续页 | complete、limitReason、truncated |
 
-统一补丁参数示例：
+这是破坏性协议更新。不要调用 `fs_apply_unified_patch`，不要传 `expectedVersion`/`expectedVersions` 或旧 action/target 参数。text 模式要求非空 oldText，默认唯一精确匹配；多处替换必须同时给出 replaceAll=true 与准确 expectedCount。patch 模式可选 cwd/dryRun，不接受 text 模式参数。
 
 ```json
-{
-  "patch": "--- note.txt\n+++ note.txt\n@@ -1 +1 @@\n-old\n+new\n",
-  "expectedVersions": {"note.txt": "sha256:替换为读取返回的真实摘要"},
-  "dryRun": true
-}
+{"items":[{"path":"a.txt","content":"A","mode":"create"},{"path":"b.txt","content":"B","mode":"create"}]}
 ```
 
-新建路径的版本值为 `absent`。这不是跨进程文件系统事务；遇到 `Indeterminate` 需核对受影响路径，不能盲目重放补丁。
+```json
+{"mode":"text","path":"src/main.rs","oldText":"old","newText":"new"}
+```
+
+```json
+{"mode":"patch","patch":"*** Begin Patch\n*** Update File: note.txt\n@@\n-old\n+new\n*** End Patch"}
+```
+
+创建要求目标不存在；覆盖已有文件和删除要求完整且未过期的读取基线；移动要求源版本未变、目标不存在；追加在锁内写入最新的已有内容。局部修改的旧文本与上下文必须实际读过。整文件哈希变化后仍可在最新内容上精确匹配，保留其他主体的无关修改；缺失或歧义才要求重读相关片段。dryRun 不授予读取凭证。
+
+文件工具共享 `coordination::FileCoordinationBackend` 单实例扩展，默认使用进程级共享的 `LocalFileCoordination`。能力包可通过 `file_coordination_pack(Arc<dyn FileCoordinationBackend>)` 注册后端；重复注册在装配时报错，显式后端故障不退回本地。后端负责租约与读取状态，编辑器负责哈希、精确匹配、暂存和回滚。
+
+宿主每轮通过 `FileCoordinationIdentity(FileSubject { security_domain, session_id, task_instance_id })` 提供可信主体；同一任务续跑使用相同身份，子任务必须不同。省略身份的独立集成采用保守的 run 级隔离。通过 `FileSystemToolsConfig::with_coordination_root(root, storage_namespace, workspace_id)` 配置工作区身份；不同 worktree 使用不同 ID，同一共享存储的不同挂载使用同一 ID。revision 只使读取凭证失效，不改变同文件锁身份。
+
+本轮只提供本地后端。未来 Redis 能力包必须实现状态、条件更新、租约校验/续期/丢失通知，不能只替换 mutex。租约 token 不代表普通文件系统支持 fencing。结果可能为 notApplied/applied/rolledBack/indeterminate；结果不确定时核对路径，禁止盲目重放。这不是跨进程、跨文件原子可见或断电恢复事务。会话/任务关闭时调用后端 invalidate 清理凭证；路径锁只覆盖参与协调的文件工具，不覆盖 Shell 或外部程序。
 
 ## 2. 执行命令
 

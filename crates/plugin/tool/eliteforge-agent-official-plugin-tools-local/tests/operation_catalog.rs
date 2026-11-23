@@ -12,7 +12,7 @@ fn local_catalog_separates_queries_from_mutations_and_arbitrary_commands() {
     for (name, kind) in [
         ("fs_read_text", ToolOperationKind::Query),
         ("fs_write_text", ToolOperationKind::Command),
-        ("fs_apply_unified_patch", ToolOperationKind::Command),
+        ("fs_apply_patch", ToolOperationKind::Command),
         ("command_exec", ToolOperationKind::Command),
         ("terminal_read", ToolOperationKind::Query),
         ("terminal_start", ToolOperationKind::Command),
@@ -32,7 +32,7 @@ fn local_catalog_separates_queries_from_mutations_and_arbitrary_commands() {
 #[test]
 fn every_local_tool_ships_its_display_resources_without_host_overlays() {
     let catalog = local_tool_catalog();
-    assert_eq!(catalog.len(), 19);
+    assert_eq!(catalog.len(), 18);
     for descriptor in catalog {
         let resource = descriptor
             .display

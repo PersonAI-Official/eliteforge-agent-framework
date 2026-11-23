@@ -31,8 +31,10 @@ pub(crate) fn expand_calls(
             TOOL_SEARCH_CALL_NAME | TOOL_SCHEMA_CALL_NAME
         );
         let native_batch_tool = binding.is_some_and(|b| tools.is_native(&b.descriptor.id));
-        let batch = tools.gateway
-            && (envelope.is_some() || gateway_batch_tool || native_batch_tool)
+        let batch = ((!tools.gateway && binding.is_some_and(|b| b.executor.direct_batch_input()))
+            || envelope.is_some()
+            || gateway_batch_tool
+            || native_batch_tool)
             && binding.is_some_and(|b| b.descriptor.input_mode == ToolInputMode::Batch);
         if !batch {
             let error = (tools.gateway
@@ -265,6 +267,12 @@ pub(crate) fn invocation_context(run: &RunContext, execution: &ToolExecution) ->
     // Child agents can inherit host extensions from a spawning tool. A single
     // call in that child must never inherit the parent's transport identity.
     context.extensions.remove::<ToolBatchItem>();
+    context.extensions.remove::<PreparedToolInvocation>();
+    if let Some(preparation) = &execution.preparation {
+        context
+            .extensions
+            .insert(PreparedToolInvocation(preparation.clone()));
+    }
     if let Some(item) = &execution.batch_item {
         context.extensions.insert(item.clone());
     }

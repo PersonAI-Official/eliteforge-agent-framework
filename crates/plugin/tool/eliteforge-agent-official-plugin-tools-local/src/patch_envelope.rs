@@ -4,37 +4,27 @@ use crate::{
     filesystem::FileSystemRoot,
     text_patch::{FilePatch, apply_text_hunks, parse_text_patch},
 };
-use eliteforge_agent_core::{RunContext, ToolError, ToolOutput};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use eliteforge_agent_core::{RunContext, ToolError};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Component, Path},
 };
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Input {
-    patch: String,
-    cwd: Option<String>,
-    #[serde(default)]
-    dry_run: bool,
-}
 fn fail(message: impl ToString) -> ToolError {
     ToolError::Failed(message.to_string())
 }
 
-pub(crate) fn apply(
+pub(crate) fn changes(
     filesystem: &FileSystemRoot,
-    arguments: Value,
+    patch: &str,
+    cwd: Option<&str>,
     context: &RunContext,
-) -> Result<ToolOutput, ToolError> {
-    let input: Input = serde_json::from_value(arguments).map_err(fail)?;
-    let operations = parse_text_patch(&input.patch).map_err(fail)?;
-    let _guard = edits::lock();
+    prepared: &crate::coordinated_tools::PreparedFileEdit,
+) -> Result<Vec<Change>, ToolError> {
+    let operations = parse_text_patch(patch).map_err(fail)?;
     edits::ensure_active(context)?;
-    let cwd = filesystem.resolve_directory(input.cwd.as_deref())?;
+    let cwd = filesystem.resolve_directory(cwd)?;
     let resolve = |raw: &str| -> Result<(String, std::path::PathBuf), ToolError> {
         if raw.trim().is_empty()
             || Path::new(raw)
@@ -104,6 +94,7 @@ pub(crate) fn apply(
                 let before = edits::read(&path, filesystem.max_edit_bytes())?
                     .ok_or_else(|| fail("file does not exist"))?;
                 edits::text(&before)?;
+                prepared.require_current(filesystem, &display, &before, true)?;
                 push(
                     display,
                     Some(before),
@@ -119,6 +110,25 @@ pub(crate) fn apply(
                 let (display, path) = resolve(&path)?;
                 let before = edits::read(&path, filesystem.max_edit_bytes())?
                     .ok_or_else(|| fail("file does not exist"))?;
+                prepared.require_current(filesystem, &display, &before, false)?;
+                for hunk in &hunks {
+                    if let Some(anchor) = &hunk.anchor {
+                        prepared.require_seen(filesystem, &display, anchor)?;
+                    }
+                    if !hunk.before.is_empty() {
+                        prepared.require_seen(filesystem, &display, &hunk.before.join("\n"))?;
+                    }
+                    if hunk.before.is_empty() && hunk.anchor.is_none() {
+                        prepared.require_current(filesystem, &display, &before, true)?;
+                    }
+                }
+                if destination.is_some() {
+                    prepared.require_current(filesystem, &display, &before, false)?;
+                    let observation = prepared.observation(filesystem, &display)?;
+                    if observation.fingerprint != edits::version(&before) {
+                        return Err(fail("move source changed; re-read the file"));
+                    }
+                }
                 let after = apply_text_hunks(edits::text(&before)?, &hunks)
                     .map_err(fail)?
                     .into_bytes();
@@ -140,16 +150,5 @@ pub(crate) fn apply(
             }
         }
     }
-    let changes: Vec<_> = changes.into_values().collect();
-    let previews = changes
-        .iter()
-        .map(edits::preview)
-        .collect::<Result<Vec<_>, _>>()?;
-    if !input.dry_run {
-        let _parents = edits::prepare_parents(filesystem, &changes)?;
-        edits::commit(filesystem, &changes, Some(context))?;
-    }
-    crate::tools::json_output(
-        json!({"cwd": cwd.path, "applied": !input.dry_run, "dryRun": input.dry_run, "changes": previews}),
-    )
+    Ok(changes.into_values().collect())
 }

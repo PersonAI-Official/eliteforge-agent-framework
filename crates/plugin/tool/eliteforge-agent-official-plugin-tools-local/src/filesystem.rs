@@ -25,6 +25,7 @@ pub struct FileSystemToolsConfig {
     max_results: usize,
     max_depth: usize,
     max_edit_bytes: usize,
+    coordination_roots: Vec<(PathBuf, String, String)>,
 }
 
 impl FileSystemToolsConfig {
@@ -39,6 +40,7 @@ impl FileSystemToolsConfig {
             max_results: DEFAULT_MAX_RESULTS,
             max_depth: DEFAULT_MAX_DEPTH,
             max_edit_bytes: 8 * 1024 * 1024,
+            coordination_roots: Vec::new(),
         }
     }
 
@@ -80,6 +82,18 @@ impl FileSystemToolsConfig {
         self
     }
 
+    /// Assign a stable host-owned identity to a physical workspace root. Map
+    /// every shared mount explicitly before using a distributed backend.
+    pub fn with_coordination_root(
+        mut self,
+        root: impl Into<PathBuf>,
+        storage_namespace: impl Into<String>,
+        workspace_id: impl Into<String>,
+    ) -> Self {
+        self.coordination_roots
+            .push((root.into(), storage_namespace.into(), workspace_id.into()));
+        self
+    }
     /// Maximum size of a text snapshot used for reading, versioning and editing.
     pub fn with_max_edit_bytes(mut self, value: usize) -> Self {
         self.max_edit_bytes = value.max(1);
@@ -258,6 +272,7 @@ impl Default for SystemCommandConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct FileSystemRoot {
     config: FileSystemToolsConfig,
+    pub(crate) coordination: crate::coordination::CoordinationSelection,
     pub(crate) searches: std::sync::Arc<std::sync::Mutex<crate::search::SearchCache>>,
 }
 
@@ -270,10 +285,115 @@ impl FileSystemRoot {
     pub(crate) fn new(config: FileSystemToolsConfig) -> Self {
         Self {
             config,
+            coordination: Default::default(),
             searches: Default::default(),
         }
     }
 
+    pub(crate) fn with_coordination(
+        mut self,
+        selection: crate::coordination::CoordinationSelection,
+    ) -> Self {
+        self.coordination = selection;
+        self
+    }
+    pub(crate) fn authorization_revision(&self) -> String {
+        use sha2::Digest;
+        format!(
+            "{:x}",
+            sha2::Sha256::digest(format!("{:?}", self.config).as_bytes())
+        )
+    }
+    pub(crate) fn display_for_physical(&self, path: &Path) -> String {
+        if self.config.authorized_roots.is_some() {
+            return path.to_string_lossy().into_owned();
+        }
+        match fs::canonicalize(&self.config.root) {
+            Ok(root) => self.display(&root, path),
+            Err(_) => path.to_string_lossy().into_owned(),
+        }
+    }
+    pub(crate) fn resource(
+        &self,
+        raw: &str,
+    ) -> Result<crate::coordination::FileResource, ToolError> {
+        let resolved = self.resolve(raw)?;
+        let original = resolved.path;
+        let mut existing = original.as_path();
+        while fs::symlink_metadata(existing).is_err() {
+            existing = existing
+                .parent()
+                .ok_or_else(|| ToolError::Failed("path has no existing ancestor".into()))?;
+        }
+        let physical = fs::canonicalize(existing).map_err(|e| ToolError::Failed(e.to_string()))?;
+        let suffix = original
+            .strip_prefix(existing)
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        let path = if suffix.as_os_str().is_empty() {
+            physical
+        } else {
+            physical.join(suffix)
+        };
+        let mapping = self
+            .config
+            .coordination_roots
+            .iter()
+            .filter_map(|(root, namespace, workspace)| {
+                let root = fs::canonicalize(root).ok()?;
+                path.strip_prefix(&root).ok().map(|relative| {
+                    (
+                        root.components().count(),
+                        namespace.clone(),
+                        workspace.clone(),
+                        relative.to_path_buf(),
+                    )
+                })
+            })
+            .max_by_key(|m| m.0);
+        let (storage_namespace, workspace_id, relative) =
+            if let Some((_, namespace, workspace, relative)) = mapping {
+                (namespace, workspace, relative)
+            } else {
+                let backend = self.coordination.backend()?;
+                if !matches!(
+                    backend.capabilities().scope,
+                    crate::coordination::FileCoordinationScope::Process
+                ) {
+                    return Err(ToolError::Failed(
+                        "distributed file coordination requires an explicit workspace mapping"
+                            .into(),
+                    ));
+                }
+                let physical_root = self
+                    .config
+                    .authorized_roots
+                    .as_ref()
+                    .and_then(|roots| {
+                        roots
+                            .iter()
+                            .filter_map(|r| fs::canonicalize(r).ok())
+                            .filter(|r| path.starts_with(r))
+                            .max_by_key(|r| r.components().count())
+                    })
+                    .unwrap_or_else(|| resolved.root.clone());
+                (
+                    "local".into(),
+                    physical_root.to_string_lossy().into_owned(),
+                    path.strip_prefix(&physical_root)
+                        .map_err(|e| ToolError::Failed(e.to_string()))?
+                        .to_path_buf(),
+                )
+            };
+        if storage_namespace.is_empty() || workspace_id.is_empty() {
+            return Err(ToolError::Failed("empty file coordination identity".into()));
+        }
+        Ok(crate::coordination::FileResource {
+            storage_namespace,
+            workspace_id,
+            path: relative.to_string_lossy().replace('\\', "/"),
+            physical_alias: path.to_string_lossy().into_owned(),
+        })
+    }
     pub(crate) fn fresh(&self) -> Self {
         Self::new(self.config.clone())
     }

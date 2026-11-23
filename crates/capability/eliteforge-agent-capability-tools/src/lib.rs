@@ -21,6 +21,20 @@ pub use eliteforge_agent_official_plugin_tools_local::{
     FileSystemToolsConfig, SystemCommandConfig,
 };
 
+pub use eliteforge_agent_official_plugin_tools_local::coordination::{
+    FileCoordinationBackend, FileCoordinationCapabilities, FileCoordinationIdentity,
+    FileCoordinationLease, FileCoordinationPlugin, FileCoordinationScope, FileEditOutcome,
+    FileEditStatus, FileFragment, FileInvalidation, FileObservation, FileResource, FileSubject,
+    LocalFileCoordination, default_file_coordination,
+};
+/// A backend supplied by a capability pack replaces the shared local fallback.
+pub fn file_coordination_pack(
+    backend: Arc<dyn FileCoordinationBackend>,
+) -> CapabilityPackBuilder<()> {
+    CapabilityPackBuilder::new("framework.filesystem.coordination", ())
+        .plugin(FileCoordinationPlugin(backend))
+}
+
 pub const READ_ONLY_FILESYSTEM_PACK: &str = "framework.filesystem.readonly";
 pub const WRITE_FILESYSTEM_PACK: &str = "framework.filesystem.write";
 pub const SYSTEM_COMMAND_PACK: &str = "framework.system-command";

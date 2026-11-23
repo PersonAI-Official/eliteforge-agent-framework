@@ -344,15 +344,34 @@ pub struct ChatRequest {
 
 /// A provider output item retains its position within one model invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ModelOutputItem {
-    Message { output_index: usize, item_id: Option<String>, phase: Option<String>, content: crate::Content },
-    ReasoningSummary { output_index: usize, text: String },
-    ToolCall { output_index: usize, call: ToolCall },
+    Message {
+        output_index: usize,
+        item_id: Option<String>,
+        phase: Option<String>,
+        content: crate::Content,
+    },
+    ReasoningSummary {
+        output_index: usize,
+        text: String,
+    },
+    ToolCall {
+        output_index: usize,
+        call: ToolCall,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ModelDisposition { Final, ToolCalls, Continue }
+pub enum ModelDisposition {
+    Final,
+    ToolCalls,
+    Continue,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
@@ -387,35 +406,53 @@ impl ChatResponse {
     /// Normalize segmented provider output once at the shared model boundary.
     /// Legacy responses without output items keep their existing projection.
     pub fn normalize_output_items(&mut self) -> Result<(), crate::ModelError> {
-        if self.output_items.is_empty() { return Ok(()); }
+        if self.output_items.is_empty() {
+            return Ok(());
+        }
         let index = |item: &ModelOutputItem| match item {
             ModelOutputItem::Message { output_index, .. }
             | ModelOutputItem::ReasoningSummary { output_index, .. }
             | ModelOutputItem::ToolCall { output_index, .. } => *output_index,
         };
         self.output_items.sort_by_key(index);
-        if self.output_items.windows(2).any(|pair| index(&pair[0]) == index(&pair[1])) {
-            return Err(crate::ModelError::Fatal("duplicate model output index".into()));
+        if self
+            .output_items
+            .windows(2)
+            .any(|pair| index(&pair[0]) == index(&pair[1]))
+        {
+            return Err(crate::ModelError::Fatal(
+                "duplicate model output index".into(),
+            ));
         }
-        let item_calls: Vec<_> = self.output_items.iter().filter_map(|item| match item {
-            ModelOutputItem::ToolCall { call, .. } => Some(call.clone()),
-            _ => None,
-        }).collect();
+        let item_calls: Vec<_> = self
+            .output_items
+            .iter()
+            .filter_map(|item| match item {
+                ModelOutputItem::ToolCall { call, .. } => Some(call.clone()),
+                _ => None,
+            })
+            .collect();
         if self.tool_calls.is_empty() {
             self.tool_calls = item_calls.clone();
         } else if !item_calls.is_empty() && item_calls.len() != self.tool_calls.len() {
-            return Err(crate::ModelError::Fatal("model output tool count changed".into()));
+            return Err(crate::ModelError::Fatal(
+                "model output tool count changed".into(),
+            ));
         }
         let mut calls = self.tool_calls.iter();
         for item in &mut self.output_items {
-            if let ModelOutputItem::ToolCall { call, .. } = item && let Some(normalized) = calls.next() {
+            if let ModelOutputItem::ToolCall { call, .. } = item
+                && let Some(normalized) = calls.next()
+            {
                 *call = normalized.clone();
             }
         }
-        let has_content = |content: &crate::Content| content.0.iter().any(|block| match block {
-            crate::ContentBlock::Text { text } => !text.trim().is_empty(),
-            _ => true,
-        });
+        let has_content = |content: &crate::Content| {
+            content.0.iter().any(|block| match block {
+                crate::ContentBlock::Text { text } => !text.trim().is_empty(),
+                _ => true,
+            })
+        };
         let explicit_final = self.output_items.iter().any(|item| matches!(item,
             ModelOutputItem::Message { phase: Some(phase), content, .. } if phase == "final_answer" && has_content(content)));
         let mut content = crate::Content::default();
@@ -423,11 +460,22 @@ impl ChatResponse {
         let mut commentary = false;
         let mut other_message = false;
         for item in &self.output_items {
-            if let ModelOutputItem::Message { phase, content: item_content, .. } = item && has_content(item_content) {
+            if let ModelOutputItem::Message {
+                phase,
+                content: item_content,
+                ..
+            } = item
+                && has_content(item_content)
+            {
                 commentary |= phase.as_deref() == Some("commentary");
                 other_message |= phase.as_deref() != Some("commentary");
-                if phase.as_deref() == Some("final_answer") || (!explicit_final && phase.is_none()) {
-                    if selected > 0 { content.0.push(crate::ContentBlock::Text { text: "\n\n".into() }); }
+                if phase.as_deref() == Some("final_answer") || (!explicit_final && phase.is_none())
+                {
+                    if selected > 0 {
+                        content.0.push(crate::ContentBlock::Text {
+                            text: "\n\n".into(),
+                        });
+                    }
                     content.0.extend(item_content.0.clone());
                     selected += 1;
                 }
@@ -458,13 +506,19 @@ impl ChatResponse {
                     messages.push(message);
                 }
                 ModelOutputItem::ToolCall { .. } => {
-                    if messages.is_empty() { messages.push(Message::assistant(crate::Content::default())); }
-                    if let Some(call) = calls.next() { messages.last_mut().unwrap().tool_calls.push(call.clone()); }
+                    if messages.is_empty() {
+                        messages.push(Message::assistant(crate::Content::default()));
+                    }
+                    if let Some(call) = calls.next() {
+                        messages.last_mut().unwrap().tool_calls.push(call.clone());
+                    }
                 }
                 ModelOutputItem::ReasoningSummary { .. } => {}
             }
         }
-        if messages.is_empty() { messages.push(Message::assistant(self.content.clone())); }
+        if messages.is_empty() {
+            messages.push(Message::assistant(self.content.clone()));
+        }
         if let Some(last) = messages.last_mut() {
             last.tool_calls.extend(calls.cloned());
             last.structured = self.structured.clone();
@@ -812,7 +866,9 @@ impl Default for RunLimits {
 fn default_child_runs() -> usize {
     32
 }
-fn default_phase_continuations() -> usize { 2 }
+fn default_phase_continuations() -> usize {
+    2
+}
 fn default_child_depth() -> usize {
     8
 }
@@ -1068,7 +1124,9 @@ pub trait ChatStream: Send + Sync {
     async fn reasoning_delta(&self, text: &str);
     /// Message item lifecycle; providers without item boundaries use text_delta.
     async fn message_start(&self, _index: usize, _phase: Option<&str>) {}
-    async fn message_delta(&self, _index: usize, text: &str) { self.text_delta(text).await; }
+    async fn message_delta(&self, _index: usize, text: &str) {
+        self.text_delta(text).await;
+    }
     async fn message_end(&self, _index: usize, _phase: Option<&str>, _text: &str) {}
     /// Marks a provider tool item before later messages in the same response.
     async fn tool_boundary(&self, _index: usize) {}
@@ -1203,9 +1261,50 @@ impl ToolOutput {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Opt in to batch-only contracts outside the tool gateway as well.
+    fn direct_batch_input(&self) -> bool {
+        false
+    }
+    /// Prepare immutable invocation state before any sibling effects. No locks or
+    /// user approval may be held across this boundary.
+    async fn prepare(
+        &self,
+        _arguments: &Value,
+        _context: &RunContext,
+    ) -> Result<Option<ToolPreparation>, ToolError> {
+        Ok(None)
+    }
     /// Arguments are JSON Schema validated by the invoker before this call.
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError>;
 }
+
+/// Backend-neutral access reservation and durable preparation payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolPreparation {
+    pub resources: Vec<ToolResourceAccess>,
+    pub state: Value,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResourceAccess {
+    pub key: String,
+    pub write: bool,
+}
+impl ToolPreparation {
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        self.resources.iter().any(|a| {
+            a.write
+                && other.resources.iter().any(|b| {
+                    b.write
+                        && (a.key == b.key
+                            || a.key.starts_with(&format!("{}/", b.key))
+                            || b.key.starts_with(&format!("{}/", a.key)))
+                })
+        })
+    }
+}
+/// Host-only invocation state. Never taken from model arguments.
+#[derive(Clone)]
+pub struct PreparedToolInvocation(pub ToolPreparation);
 
 /// Provider-declared catalog grouping. This metadata is kept apart from the
 /// model-facing tool descriptor and does not grant execution authority.

@@ -280,7 +280,13 @@ impl ToolSet {
             .by_name
             .values()
             .filter(|binding| binding.exposed)
-            .map(|binding| model_tool_descriptor(&binding.descriptor))
+            .map(|binding| {
+                if binding.executor.direct_batch_input() {
+                    batch_tool_descriptor(&binding.descriptor)
+                } else {
+                    model_tool_descriptor(&binding.descriptor)
+                }
+            })
             .collect();
         tools.sort_by(|left, right| left.call_name.cmp(&right.call_name));
         tools

@@ -16,9 +16,9 @@ pub enum FilePatch {
 }
 #[derive(Debug)]
 pub struct TextHunk {
-    anchor: Option<String>,
-    before: Vec<String>,
-    after: Vec<String>,
+    pub(crate) anchor: Option<String>,
+    pub(crate) before: Vec<String>,
+    pub(crate) after: Vec<String>,
     eof: bool,
 }
 

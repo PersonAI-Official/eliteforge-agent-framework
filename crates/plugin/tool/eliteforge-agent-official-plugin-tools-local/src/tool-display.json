@@ -8,7 +8,7 @@
       },
       "zh-CN": {
         "name": "读取文件",
-        "description": "读取授权目录中的文本文件或会话附件，可指定行范围。"
+        "description": "批量读取授权目录中的文本文件，可指定行范围；宿主记录实际返回内容的版本与读取范围。会话附件不授予工作区编辑凭证。"
       }
     },
     "filesystem.list": {
@@ -38,7 +38,7 @@
       },
       "zh-CN": {
         "name": "写入文件",
-        "description": "在授权目录中创建文件或写入文本，可校验文件版本。"
+        "description": "通过 items 批量创建、完整覆盖或追加文件，必须指定 mode。创建要求目标不存在，覆盖要求完整且未过期的读取基线，追加写入最新内容。局部修改优先使用 fs_apply_patch。"
       }
     },
     "filesystem.search.grep": {
@@ -99,16 +99,6 @@
       "zh-CN": {
         "name": "停止命令",
         "description": "停止当前会话中正在运行的命令任务，并返回状态和最新输出。"
-      }
-    },
-    "filesystem.apply_unified_patch": {
-      "en-US": {
-        "name": "File Apply Unified Patch",
-        "description": null
-      },
-      "zh-CN": {
-        "name": "应用文件补丁",
-        "description": "按差异补丁创建、修改、删除或重命名文件，可预览并校验文件版本。"
       }
     },
     "system.command.task.write": {
@@ -188,7 +178,7 @@
       },
       "zh-CN": {
         "name": "编辑文件",
-        "description": "替换、删除或插入文件中的指定文本，可校验匹配次数和文件版本。"
+        "description": "mode=text 精确替换已读取的文本；mode=patch 使用 Begin Patch 一次修改多个关联文件。上下文唯一匹配时保留其他代理的无关修改；歧义或真实冲突会拒绝。dryRun 仅预览补丁。无需传版本号。"
       }
     }
   },

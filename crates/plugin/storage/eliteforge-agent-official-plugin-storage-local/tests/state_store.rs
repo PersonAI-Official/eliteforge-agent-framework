@@ -35,6 +35,7 @@ async fn transcript_state_and_events_survive_close_and_reopen_together() {
         state: ToolExecutionState::Started,
         via_gateway: false,
         batch_item: None,
+        preparation: None,
     };
     snapshot.state = serde_json::to_value(&invocation).unwrap();
     snapshot.status = ExecutionStatus::Failed;

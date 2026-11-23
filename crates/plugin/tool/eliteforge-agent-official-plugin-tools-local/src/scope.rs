@@ -69,12 +69,14 @@ pub struct LocalToolScopeRevision(pub String);
 pub struct ScopedLocalToolsPlugin {
     pty: Option<pty::PtyService>,
     provider: std::sync::Arc<dyn LocalToolScopeProvider>,
+    coordination: crate::coordination::CoordinationSelection,
 }
 
 impl ScopedLocalToolsPlugin {
     pub fn new(provider: std::sync::Arc<dyn LocalToolScopeProvider>) -> Self {
         Self {
             provider,
+            coordination: Default::default(),
             pty: None,
         }
     }
@@ -88,6 +90,7 @@ struct ScopedLocalTools {
     pty: pty::PtyService,
     provider: Arc<dyn LocalToolScopeProvider>,
     tasks: tasks::CommandTaskManager,
+    coordination: crate::coordination::CoordinationSelection,
 }
 
 /// Bounded revision history belongs to one run lease, shared by all its tools.
@@ -103,6 +106,7 @@ impl ScopeVersions {
         session: &str,
         tasks: &tasks::CommandTaskManager,
         pty: &pty::PtyService,
+        coordination: &crate::coordination::CoordinationSelection,
     ) -> Result<Vec<ToolBinding>, ToolError> {
         if snapshot.revision.is_empty() || snapshot.revision.len() > 512 {
             return Err(ToolError::Failed("invalid local scope revision".into()));
@@ -120,8 +124,9 @@ impl ScopeVersions {
                     "local scope revision capacity exceeded".into(),
                 ));
             }
-            let bindings = grant_bindings(snapshot.grant.clone(), session, tasks, pty)
-                .map_err(|error| ToolError::Failed(error.to_string()))?;
+            let bindings =
+                grant_bindings(snapshot.grant.clone(), session, tasks, pty, coordination)
+                    .map_err(|error| ToolError::Failed(error.to_string()))?;
             revisions.insert(
                 snapshot.revision.clone(),
                 ScopeVersion {
@@ -141,9 +146,47 @@ struct InvocationScopedTool {
     versions: Arc<ScopeVersions>,
     pty: pty::PtyService,
     tasks: tasks::CommandTaskManager,
+    coordination: crate::coordination::CoordinationSelection,
 }
 #[async_trait]
 impl Tool for InvocationScopedTool {
+    fn direct_batch_input(&self) -> bool {
+        matches!(
+            self.descriptor.id.as_str(),
+            "filesystem.read_text" | "filesystem.write_text"
+        )
+    }
+    async fn prepare(
+        &self,
+        arguments: &Value,
+        run: &RunContext,
+    ) -> Result<Option<eliteforge_agent_core::ToolPreparation>, ToolError> {
+        let snapshot = self
+            .provider
+            .snapshot(run)
+            .await
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        let binding = self
+            .versions
+            .resolve(
+                &snapshot,
+                &run.session_id,
+                &self.tasks,
+                &self.pty,
+                &self.coordination,
+            )?
+            .into_iter()
+            .find(|b| b.descriptor.id == self.descriptor.id)
+            .ok_or_else(|| ToolError::Failed("local tool authority revoked".into()))?;
+        if binding.descriptor != self.descriptor {
+            return Err(ToolError::Failed("local tool contract changed".into()));
+        }
+        let mut invocation = run.clone();
+        invocation
+            .extensions
+            .insert(LocalToolScopeRevision(snapshot.revision));
+        binding.executor.prepare(arguments, &invocation).await
+    }
     async fn call(&self, arguments: Value, run: &RunContext) -> Result<ToolOutput, ToolError> {
         run.check_cancelled()
             .map_err(|error| ToolError::Failed(error.to_string()))?;
@@ -165,7 +208,13 @@ impl Tool for InvocationScopedTool {
         }
         let binding = self
             .versions
-            .resolve(&snapshot, &run.session_id, &self.tasks, &self.pty)?
+            .resolve(
+                &snapshot,
+                &run.session_id,
+                &self.tasks,
+                &self.pty,
+                &self.coordination,
+            )?
             .into_iter()
             .find(|binding| binding.descriptor.id == self.descriptor.id)
             .ok_or_else(|| ToolError::Failed("local tool authority was revoked".into()))?;
@@ -204,7 +253,13 @@ impl ToolProvider for ScopedLocalTools {
             .clone()
             .unwrap_or_else(|| run.session_id.clone());
         let mut bindings = versions
-            .resolve(&snapshot, &run.session_id, &self.tasks, &self.pty)
+            .resolve(
+                &snapshot,
+                &run.session_id,
+                &self.tasks,
+                &self.pty,
+                &self.coordination,
+            )
             .map_err(|error| AgentError::ToolSetup(error.to_string()))?;
         for binding in &mut bindings {
             binding.category = Some(eliteforge_agent_core::ToolCategory::localized(
@@ -219,6 +274,7 @@ impl ToolProvider for ScopedLocalTools {
                 versions: versions.clone(),
                 pty: self.pty.clone(),
                 tasks: self.tasks.clone(),
+                coordination: self.coordination.clone(),
             });
         }
         Ok(ToolLease::new(bindings))
@@ -230,8 +286,10 @@ fn grant_bindings(
     session: &str,
     tasks: &tasks::CommandTaskManager,
     pty: &pty::PtyService,
+    coordination: &crate::coordination::CoordinationSelection,
 ) -> Result<Vec<ToolBinding>, AgentError> {
-    let root = filesystem::FileSystemRoot::new(grant.filesystem.clone());
+    let root = filesystem::FileSystemRoot::new(grant.filesystem.clone())
+        .with_coordination(coordination.clone());
     let mut bindings: Vec<_> = tools::read_only_bindings(root.clone())
         .into_iter()
         .chain(tools::write_bindings(root))
@@ -324,9 +382,17 @@ impl Plugin for ScopedLocalToolsPlugin {
                 pty,
                 provider: self.provider.clone(),
                 tasks,
+                coordination: self.coordination.clone(),
             },
         )
         .install(context)
         .await
+    }
+    async fn ready(
+        &self,
+        context: &mut eliteforge_agent_core::PluginReadyContext<'_>,
+    ) -> Result<(), PluginError> {
+        self.coordination.ready(context);
+        Ok(())
     }
 }

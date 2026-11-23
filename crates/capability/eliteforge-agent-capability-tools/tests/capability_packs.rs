@@ -112,15 +112,31 @@ impl AgentLoop for InvokeToolLoop {
             else {
                 continue;
             };
+            let mut invocation = context.clone();
+            invocation.extensions.insert(eliteforge_agent_official_plugin_tools_local::coordination::FileCoordinationIdentity(
+                eliteforge_agent_official_plugin_tools_local::coordination::FileSubject {
+                    security_domain: "existing-tool-fixture".into(), session_id: context.session_id.clone(), task_instance_id: "fixture-task".into(),
+                },
+            ));
             let output = binding
                 .executor
-                .call(self.arguments.clone(), context)
+                .call(self.arguments.clone(), &invocation)
                 .await
                 .map_err(|error| AgentError::Run(error.to_string()))?;
+            if output.is_error {
+                return Err(AgentError::Run(output.content.text()));
+            }
+            let structured = output.structured.map(|value| {
+                if value["kind"] == "toolBatch" {
+                    value["results"][0]["result"].clone()
+                } else {
+                    value
+                }
+            });
             *self
                 .output
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = output.structured;
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = structured;
             return Ok(completed());
         }
         Err(AgentError::Run(format!(
@@ -231,7 +247,7 @@ impl ToolHarness {
     }
 
     async fn filesystem(config: FileSystemToolsConfig) -> Self {
-        let invocation = Arc::new(Mutex::new(("fs_read_text", json!({}))));
+        let invocation = Arc::new(Mutex::new(("fs_read_text", json!({"items":[{}]}))));
         let output = Arc::new(Mutex::new(None));
         let agent = builder(CommandTaskLoop {
             invocation: invocation.clone(),
@@ -342,11 +358,7 @@ async fn default_command_handoff_returns_after_ten_seconds() {
     let start = Instant::now();
     let running = tokio::time::timeout(
         Duration::from_secs(15),
-        harness.call(
-            "owner",
-            "command_exec",
-            json!({"command": "sleep 30"}),
-        ),
+        harness.call("owner", "command_exec", json!({"command": "sleep 30"})),
     )
     .await
     .unwrap()
@@ -384,7 +396,12 @@ async fn closing_framework_terminates_its_background_command() {
         )
         .await
         .unwrap();
-    let pid: u32 = running["stdout"]["content"].as_str().unwrap().trim().parse().unwrap();
+    let pid: u32 = running["stdout"]["content"]
+        .as_str()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let is_running = || {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -414,7 +431,7 @@ async fn readonly_and_write_filesystem_packs_operate_inside_the_configured_direc
     let read = invoke(
         read_only_filesystem_pack(config.clone()),
         "fs_read_text",
-        json!({"path":"notes.txt", "startLine":2}),
+        json!({"items":[{"path":"notes.txt", "startLine":2}]}),
     )
     .await;
     assert_eq!(read["content"], json!("needle\nlast line"));
@@ -431,10 +448,10 @@ async fn readonly_and_write_filesystem_packs_operate_inside_the_configured_direc
     let write = invoke(
         write_filesystem_pack(config.clone()),
         "fs_write_text",
-        json!({"path":"nested/generated.txt", "content":"draft", "mode":"create"}),
+        json!({"items":[{"path":"nested/generated.txt", "content":"draft", "mode":"create"}]}),
     )
     .await;
-    assert_eq!(write["bytesWritten"], json!(5));
+    assert_eq!(write["status"], "applied");
     assert_eq!(
         std::fs::read_to_string(directory.path().join("nested/generated.txt")).unwrap(),
         "draft"
@@ -443,10 +460,10 @@ async fn readonly_and_write_filesystem_packs_operate_inside_the_configured_direc
     let patch = invoke(
         write_filesystem_pack(config),
         "fs_apply_patch",
-        json!({"path":"nested/generated.txt", "action":"replace", "target":"draft", "content":"done"}),
+        json!({"mode":"text","path":"nested/generated.txt","oldText":"draft","newText":"done"}),
     )
     .await;
-    assert_eq!(patch["replacements"], json!(1));
+    assert_eq!(patch["status"], "applied");
     assert_eq!(
         std::fs::read_to_string(directory.path().join("nested/generated.txt")).unwrap(),
         "done"
@@ -479,7 +496,12 @@ async fn local_domain_pack_combines_selected_tools_without_duplicate_providers()
         tools.iter().filter(|name| *name == "command_exec").count(),
         1
     );
-    let read = invoke(selection(), "fs_read_text", json!({"path":"note.txt"})).await;
+    let read = invoke(
+        selection(),
+        "fs_read_text",
+        json!({"items":[{"path":"note.txt"}]}),
+    )
+    .await;
     assert_eq!(read["content"], "from local pack");
 }
 
@@ -583,7 +605,7 @@ async fn filesystem_packs_reject_parent_directory_escape() {
     let error = invoke_error(
         read_only_filesystem_pack(FileSystemToolsConfig::new(directory.path())),
         "fs_read_text",
-        json!({"path":"../outside.txt"}),
+        json!({"items":[{"path":"../outside.txt"}]}),
     )
     .await;
     assert!(error.contains("path must be relative to the configured filesystem root"));
@@ -598,7 +620,7 @@ async fn filesystem_packs_reject_symbolic_links() {
     let error = invoke_error(
         read_only_filesystem_pack(FileSystemToolsConfig::new(directory.path())),
         "fs_read_text",
-        json!({"path":"outside-link"}),
+        json!({"items":[{"path":"outside-link"}]}),
     )
     .await;
     assert!(error.contains("symbolic links are not allowed"));
@@ -713,9 +735,16 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
     let harness =
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(30)))
             .await;
-    let started = harness.call("owner", "command_exec", json!({
-        "command":r#"read first; printf "first=%s\n" "$first"; cat"#, "interactive":true
-    })).await.unwrap();
+    let started = harness
+        .call(
+            "owner",
+            "command_exec",
+            json!({
+                "command":r#"read first; printf "first=%s\n" "$first"; cat"#, "interactive":true
+            }),
+        )
+        .await
+        .unwrap();
     assert_eq!(started["stdinOpen"], true);
     assert_eq!(started["tty"], false);
     let id = &started["taskId"];
@@ -813,7 +842,10 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
         .unwrap();
     let finished = command_until_terminal(&harness, id).await;
     assert_eq!(finished["success"], true, "{finished}");
-    let output = finished["stdout"]["content"].as_str().unwrap().replace("\r\n", "\n");
+    let output = finished["stdout"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("\r\n", "\n");
     assert!(output.contains("40 100\n"), "{output}");
     assert!(output.contains("answer=terminal-value\n"), "{output}");
     assert!(output.contains("error-stream\n"), "{output}");
@@ -878,7 +910,12 @@ async fn timeout_and_framework_close_clean_managed_descendants() {
             )
             .await
             .unwrap();
-        let descendant: u32 = started["stdout"]["content"].as_str().unwrap().trim().parse().unwrap();
+        let descendant: u32 = started["stdout"]["content"]
+            .as_str()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         if timed_out {
             let finished = command_until_terminal(&harness, &started["taskId"]).await;
             assert_eq!(finished["status"], "timed_out");
@@ -904,7 +941,15 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
         .await
         .unwrap();
     assert_eq!(finished["status"], "completed");
-    assert_process_gone(finished["stdout"]["content"].as_str().unwrap().trim().parse().unwrap()).await;
+    assert_process_gone(
+        finished["stdout"]["content"]
+            .as_str()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    )
+    .await;
     let finished = harness
         .call(
             "owner",
@@ -919,78 +964,84 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
 }
 
 #[tokio::test]
-async fn unified_patch_accepts_relative_versions_with_authorized_roots() {
+async fn patch_accepts_relative_context_with_authorized_roots() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("note.txt");
     std::fs::write(&path, "old\n").unwrap();
-    let config = FileSystemToolsConfig::new(root.path())
-        .with_authorized_roots(vec![root.path().to_path_buf()]);
-    let harness = ToolHarness::filesystem(config).await;
-    let read = harness
-        .call("owner", "fs_read_text", json!({"path":"note.txt"}))
+    let harness = ToolHarness::filesystem(
+        FileSystemToolsConfig::new(root.path()).with_authorized_roots([root.path()]),
+    )
+    .await;
+    harness
+        .call(
+            "owner",
+            "fs_read_text",
+            json!({"items":[{"path":"note.txt"}]}),
+        )
         .await
         .unwrap();
-    let patch = "--- note.txt\n+++ note.txt\n@@ -1 +1 @@\n-old\n+new\n";
-    let duplicate = json!({"patch":patch,"expectedVersions":{"note.txt":read["version"],(path.to_string_lossy().to_string()):read["version"]}});
+    let duplicate = "*** Begin Patch\n*** Update File: note.txt\n@@\n-old\n+new\n*** Update File: note.txt\n@@\n-old\n+other\n*** End Patch";
     assert!(
         harness
-            .call("owner", "fs_apply_unified_patch", duplicate)
+            .call(
+                "owner",
+                "fs_apply_patch",
+                json!({"mode":"patch","patch":duplicate})
+            )
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate paths")
+            .is_err()
     );
     let result = harness
         .call(
             "owner",
-            "fs_apply_unified_patch",
-            json!({"patch":patch,"expectedVersions":{"note.txt":read["version"]}}),
+            "fs_apply_patch",
+            json!({"mode":"text","path":path.to_string_lossy(),"oldText":"old","newText":"new"}),
         )
         .await
         .unwrap();
-    assert_eq!(result["applied"], true);
+    assert_eq!(result["status"], "applied");
     assert_eq!(std::fs::read_to_string(path).unwrap(), "new\n");
     assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
-async fn unified_patch_previews_versions_creates_deletes_and_rejects_stale_writes() {
+async fn patch_previews_creates_deletes_and_rejects_stale_overwrites() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("a.txt"), "old\n").unwrap();
     std::fs::write(root.path().join("b.txt"), "remove\n").unwrap();
     let harness = ToolHarness::filesystem(FileSystemToolsConfig::new(root.path())).await;
-    let a = harness
-        .call("owner", "fs_read_text", json!({"path":"a.txt"}))
+    harness
+        .call(
+            "owner",
+            "fs_read_text",
+            json!({"items":[{"path":"a.txt"},{"path":"b.txt"}]}),
+        )
         .await
         .unwrap();
-    let b = harness
-        .call("owner", "fs_read_text", json!({"path":"b.txt"}))
-        .await
-        .unwrap();
-    let patch = "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old\n+new\n--- b.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-remove\n--- /dev/null\n+++ nested/c.txt\n@@ -0,0 +1 @@\n+created\n";
-    let mut args = json!({"patch":patch,"expectedVersions":{"a.txt":a["version"],"b.txt":b["version"],"nested/c.txt":"absent"},"dryRun":true});
+    let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** Delete File: b.txt\n*** Add File: nested/c.txt\n+created\n*** End Patch";
     let preview = harness
-        .call("owner", "fs_apply_unified_patch", args.clone())
+        .call(
+            "owner",
+            "fs_apply_patch",
+            json!({"mode":"patch","patch":patch,"dryRun":true}),
+        )
         .await
         .unwrap();
-    assert_eq!(preview["applied"], false);
-    assert!(
-        preview["changes"][0]["diff"]
-            .as_str()
-            .unwrap()
-            .contains("+new")
-    );
+    assert_eq!(preview["status"], "notApplied");
     assert_eq!(
         std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
         "old\n"
     );
     assert!(!root.path().join("nested/c.txt").exists());
-    args["dryRun"] = json!(false);
     let result = harness
-        .call("owner", "fs_apply_unified_patch", args.clone())
+        .call(
+            "owner",
+            "fs_apply_patch",
+            json!({"mode":"patch","patch":patch}),
+        )
         .await
         .unwrap();
-    assert_eq!(result["applied"], true);
+    assert_eq!(result["status"], "applied");
     assert_eq!(
         std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
         "new\n"
@@ -1000,26 +1051,30 @@ async fn unified_patch_previews_versions_creates_deletes_and_rejects_stale_write
         std::fs::read_to_string(root.path().join("nested/c.txt")).unwrap(),
         "created\n"
     );
-    let error = harness
-        .call(
-            "owner",
-            "fs_write_text",
-            json!({"path":"a.txt","content":"bad","expectedVersion":a["version"]}),
-        )
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("version conflict"));
-    let error = harness.call("owner", "fs_apply_patch", json!({"path":"a.txt","action":"replace","target":"new","content":"bad","expectedVersion":a["version"]})).await.unwrap_err();
-    assert!(error.to_string().contains("version conflict"));
+    std::fs::write(root.path().join("a.txt"), "external\n").unwrap();
     assert!(
         harness
-            .call("owner", "fs_apply_unified_patch", args)
+            .call(
+                "owner",
+                "fs_write_text",
+                json!({"items":[{"path":"a.txt","mode":"overwrite","content":"bad"}]})
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        harness
+            .call(
+                "owner",
+                "fs_apply_patch",
+                json!({"mode":"text","path":"a.txt","oldText":"new","newText":"bad"})
+            )
             .await
             .is_err()
     );
     assert_eq!(
         std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
-        "new\n"
+        "external\n"
     );
     assert!(harness.agent.framework().close().await.is_success());
 }
@@ -1031,15 +1086,21 @@ async fn patch_validates_all_files_before_changing_anything_and_honors_limits() 
     let harness =
         ToolHarness::filesystem(FileSystemToolsConfig::new(root.path()).with_max_edit_bytes(64))
             .await;
-    let read = harness
-        .call("owner", "fs_read_text", json!({"path":"a"}))
+    harness
+        .call("owner", "fs_read_text", json!({"items":[{"path":"a"}]}))
         .await
         .unwrap();
-    let error = harness.call("owner", "fs_apply_unified_patch", json!({
-        "patch":"--- a\n+++ a\n@@ -1 +1 @@\n-old\n+new\n--- ../escape\n+++ ../escape\n@@ -1 +1 @@\n-x\n+y\n",
-        "expectedVersions":{"a":read["version"],"../escape":"absent"}
-    })).await.unwrap_err();
-    assert!(error.to_string().contains("relative"));
+    let patch = "*** Begin Patch\n*** Update File: a\n@@\n-old\n+new\n*** Add File: ../escape\n+bad\n*** End Patch";
+    assert!(
+        harness
+            .call(
+                "owner",
+                "fs_apply_patch",
+                json!({"mode":"patch","patch":patch})
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("a")).unwrap(),
         "old\n"
@@ -1049,7 +1110,7 @@ async fn patch_validates_all_files_before_changing_anything_and_honors_limits() 
             .call(
                 "owner",
                 "fs_write_text",
-                json!({"path":"a","content":"x".repeat(65)})
+                json!({"items":[{"path":"a","mode":"overwrite","content":"x".repeat(65)}]})
             )
             .await
             .is_err()
@@ -1057,12 +1118,19 @@ async fn patch_validates_all_files_before_changing_anything_and_honors_limits() 
     std::fs::write(root.path().join("huge"), "x".repeat(65)).unwrap();
     assert!(
         harness
-            .call("owner", "fs_read_text", json!({"path":"huge"}))
+            .call("owner", "fs_read_text", json!({"items":[{"path":"huge"}]}))
             .await
             .is_err()
     );
-    let git = harness.call("owner", "fs_apply_unified_patch", json!({"format":"git","patch":"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+git\n","expectedVersions":{"a":read["version"]}})).await.unwrap();
-    assert_eq!(git["applied"], true);
+    let result = harness
+        .call(
+            "owner",
+            "fs_apply_patch",
+            json!({"mode":"text","path":"a","oldText":"old","newText":"git"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "applied");
     assert!(harness.agent.framework().close().await.is_success());
 }
 
@@ -1176,7 +1244,7 @@ async fn dangling_symlinks_are_rejected_before_creation() {
     let error = invoke_error(
         write_filesystem_pack(FileSystemToolsConfig::new(root.path())),
         "fs_write_text",
-        json!({"path":"link","content":"no"}),
+        json!({"items":[{"path":"link","content":"no","mode":"create"}]}),
     )
     .await;
     assert!(error.contains("symbolic links"));
@@ -1184,18 +1252,26 @@ async fn dangling_symlinks_are_rejected_before_creation() {
 }
 
 #[tokio::test]
-async fn git_rename_moves_content_and_requires_both_path_versions() {
+async fn patch_move_requires_current_source_and_absent_destination() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("old.txt"), "keep\n").unwrap();
     let harness = ToolHarness::filesystem(FileSystemToolsConfig::new(root.path())).await;
-    let read = harness
-        .call("owner", "fs_read_text", json!({"path":"old.txt"}))
+    harness
+        .call(
+            "owner",
+            "fs_read_text",
+            json!({"items":[{"path":"old.txt"}]}),
+        )
         .await
         .unwrap();
-    let patch = "diff --git a/old.txt b/sub/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to sub/new.txt\n";
-    let args = json!({"format":"git","patch":patch,"expectedVersions":{"old.txt":read["version"],"sub/new.txt":"absent"}});
+    let patch =
+        "*** Begin Patch\n*** Update File: old.txt\n*** Move to: sub/new.txt\n*** End Patch";
     let result = harness
-        .call("owner", "fs_apply_unified_patch", args)
+        .call(
+            "owner",
+            "fs_apply_patch",
+            json!({"mode":"patch","patch":patch}),
+        )
         .await
         .unwrap();
     assert_eq!(result["changes"].as_array().unwrap().len(), 2);

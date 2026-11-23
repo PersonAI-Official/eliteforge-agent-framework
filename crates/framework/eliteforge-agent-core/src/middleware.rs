@@ -666,6 +666,76 @@ impl ToolInvoker {
         context: &RunContext,
         timeout: std::time::Duration,
     ) -> Result<ToolOutput, ToolError> {
+        if binding.executor.direct_batch_input()
+            && binding.descriptor.input_mode == crate::ToolInputMode::Batch
+            && context.extensions.get::<crate::ToolBatchItem>().is_none()
+        {
+            let items = crate::tool_batch_items(&call.arguments).map_err(ToolError::Failed)?;
+            let mut prepared = Vec::new();
+            for arguments in items {
+                prepared.push(
+                    binding
+                        .executor
+                        .prepare(arguments, context)
+                        .await
+                        .map_err(|e| e.to_string()),
+                );
+            }
+            let mut outputs = Vec::new();
+            for (index, arguments) in items.iter().enumerate() {
+                let invocation = crate::RunId::new_v4();
+                let identity = crate::ToolBatchItem {
+                    invocation_id: invocation,
+                    call_id: invocation.to_string(),
+                    parent_call_id: call.id.clone(),
+                    parent_invocation_id: call.invocation_id,
+                    index,
+                };
+                let mut child = call.clone();
+                child.arguments = arguments.clone();
+                child.id = identity.call_id.clone();
+                child.invocation_id = invocation;
+                let mut run = context.clone();
+                run.extensions.insert(identity.clone());
+                if let Ok(Some(state)) = &prepared[index] {
+                    run.extensions
+                        .insert(crate::PreparedToolInvocation(state.clone()));
+                }
+                let overlap = prepared[index]
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|a| {
+                        prepared.iter().enumerate().any(|(j, b)| {
+                            j != index
+                                && b.as_ref()
+                                    .ok()
+                                    .and_then(Option::as_ref)
+                                    .is_some_and(|b| a.conflicts_with(b))
+                        })
+                    });
+                let output = if let Err(error) = &prepared[index] {
+                    ToolOutput::error(error)
+                } else if overlap {
+                    ToolOutput::error("notApplied: overlapping batch writers")
+                } else {
+                    match Box::pin(self.invoke(
+                        &invocation.to_string(),
+                        &child,
+                        binding,
+                        &run,
+                        timeout,
+                    ))
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(error) => ToolOutput::error(error.to_string()),
+                    }
+                };
+                outputs.push(crate::ToolBatchItemResult::finished(identity, &output));
+            }
+            return Ok(crate::tool_batch_output(outputs));
+        }
         let run_scoped = binding.descriptor.timeout_scope == crate::ToolTimeoutScope::Run;
         if context.is_tool_revoked(&binding.descriptor.id) {
             return Err(ToolError::Failed("tool was revoked".into()));
@@ -677,6 +747,24 @@ impl ToolInvoker {
                 "tool arguments do not match input schema".into(),
             ));
         }
+        let mut prepared_context = context.clone();
+        if prepared_context
+            .extensions
+            .get::<crate::PreparedToolInvocation>()
+            .is_none()
+        {
+            let preparation = tokio::select! {
+                biased;
+                _ = context.cancelled() => return Err(ToolError::Failed("tool preparation cancelled".into())),
+                result = tokio::time::timeout_at(context.deadline, binding.executor.prepare(&call.arguments, context)) => result.map_err(|_| ToolError::Failed("tool preparation deadline exceeded".into()))??,
+            };
+            if let Some(preparation) = preparation {
+                prepared_context
+                    .extensions
+                    .insert(crate::PreparedToolInvocation(preparation));
+            }
+        }
+        let context = &prepared_context;
         // This gate belongs to the run, so parallel DAG nodes obey the same
         // tool-safety contract as calls within a single ReAct batch. Children
         // own separate gates to permit a tool to await a delegated Agent.

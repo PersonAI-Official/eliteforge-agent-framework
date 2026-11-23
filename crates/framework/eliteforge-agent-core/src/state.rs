@@ -45,6 +45,8 @@ pub struct ToolExecution {
     /// Provider call whose result contains this independently admitted item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_item: Option<ToolBatchItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<ToolPreparation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,14 +104,16 @@ impl InteractionRequest {
             ));
         }
         let validator = compile_response_schema(&self.response_schema)?;
-        let errors: Vec<_> = validator.iter_errors(&response.value)
+        let errors: Vec<_> = validator
+            .iter_errors(&response.value)
             .take(16)
             .map(|error| format!("{}: {}", error.instance_path(), error.schema_path()))
             .collect();
         if !errors.is_empty() {
-            return Err(AgentError::InvalidConfiguration(
-                format!("interaction response does not match schema: {}", errors.join("; ")),
-            ));
+            return Err(AgentError::InvalidConfiguration(format!(
+                "interaction response does not match schema: {}",
+                errors.join("; ")
+            )));
         }
         if matches!(self.kind, InteractionKind::Approval { .. }) && !response.value.is_boolean() {
             return Err(AgentError::InvalidConfiguration(
@@ -255,7 +259,10 @@ impl Checkpoint {
     pub fn validate(&self) -> Result<(), StateError> {
         self.history.validate(self.run_id)?;
         if let Some(span) = &self.conversation_span {
-            if span.key.session_id != self.session_id || span.generation.is_empty() || span.start > self.transcript.len() {
+            if span.key.session_id != self.session_id
+                || span.generation.is_empty()
+                || span.start > self.transcript.len()
+            {
                 return Err(StateError::Invalid("invalid conversation span".into()));
             }
         }

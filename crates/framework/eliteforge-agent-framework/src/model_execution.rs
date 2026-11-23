@@ -143,7 +143,9 @@ impl AgentLoop for ModelExecutionLoop {
             .with_host_metadata(request);
             if let Some(snapshot) = initial_snapshot {
                 checkpoint.conversation_span = Some(ConversationSpan {
-                    key: snapshot.key, generation: snapshot.generation, start: snapshot.messages.len(),
+                    key: snapshot.key,
+                    generation: snapshot.generation,
+                    start: snapshot.messages.len(),
                 });
                 checkpoint.transcript = snapshot.messages;
             } else if let Some(previous) = &previous {
@@ -1356,6 +1358,7 @@ impl ModelExecutionRuntime<'_> {
                                 state,
                                 via_gateway,
                                 batch_item: batch_item.clone(),
+                                preparation: None,
                             });
                         }
                         self.state.tool_calls += admitted;
@@ -1388,6 +1391,57 @@ impl ModelExecutionRuntime<'_> {
             unreachable!()
         };
         let count = executions.len();
+        // Freeze every resource observation before any sibling can mutate state.
+        for index in 0..count {
+            let execution = self.execution(index).clone();
+            if !matches!(
+                execution.state,
+                ToolExecutionState::Planned | ToolExecutionState::Approved
+            ) || execution.preparation.is_some()
+            {
+                continue;
+            }
+            if let Some(binding) = self.tools.by_name.get(&execution.call.call_name).cloned() {
+                let context = crate::tool_batches::invocation_context(self.context, &execution);
+                let result = tokio::select! {
+                    biased;
+                    _ = self.context.cancelled() => return Err(AgentError::Cancelled),
+                    result = tokio::time::timeout_at(self.context.deadline, binding.executor.prepare(&execution.call.arguments, &context)) => result.map_err(|_| AgentError::Run("tool preparation deadline exceeded".into()))?,
+                };
+                match result {
+                    Ok(preparation) => self.execution_mut(index).preparation = preparation,
+                    Err(error) => {
+                        self.execution_mut(index).state =
+                            ToolExecutionState::Finished(ToolOutput::error(error.to_string()))
+                    }
+                }
+            }
+        }
+        let mut overlapping = std::collections::BTreeSet::new();
+        for left in 0..count {
+            for right in left + 1..count {
+                let (Some(a), Some(b)) = (
+                    &self.execution(left).preparation,
+                    &self.execution(right).preparation,
+                ) else {
+                    continue;
+                };
+                if a.conflicts_with(b) {
+                    overlapping.insert(left);
+                    overlapping.insert(right);
+                }
+            }
+        }
+        for index in overlapping {
+            if matches!(
+                self.execution(index).state,
+                ToolExecutionState::Planned | ToolExecutionState::Approved
+            ) {
+                self.execution_mut(index).state = ToolExecutionState::Finished(ToolOutput::error(
+                    "notApplied: overlapping writers in one model response; combine related changes into one patch",
+                ));
+            }
+        }
         // Evaluate the entire batch before effects. An approval-gated sibling
         // cannot be overtaken by a supposedly parallel-safe tool.
         for index in 0..count {
@@ -1942,11 +1996,22 @@ impl HistoryCommitter for ReactBudgetJournal {
             next.history.steps.push(step.clone());
         }
         for message in &messages {
-            if let Some(old) = next.history.messages.iter_mut().find(|m| m.id == message.id) {
+            if let Some(old) = next
+                .history
+                .messages
+                .iter_mut()
+                .find(|m| m.id == message.id)
+            {
                 *old = message.clone();
-            } else if let (Some(step_id), Some(output_index)) = (&message.step_id, message.output_index) {
-                let position = next.history.messages.iter().position(|existing|
-                    existing.step_id.as_ref() == Some(step_id) && existing.output_index.is_some_and(|index| index > output_index));
+            } else if let (Some(step_id), Some(output_index)) =
+                (&message.step_id, message.output_index)
+            {
+                let position = next.history.messages.iter().position(|existing| {
+                    existing.step_id.as_ref() == Some(step_id)
+                        && existing
+                            .output_index
+                            .is_some_and(|index| index > output_index)
+                });
                 if let Some(position) = position {
                     next.history.messages.insert(position, message.clone());
                 } else {
@@ -1977,7 +2042,13 @@ impl HistoryCommitter for ReactBudgetJournal {
                     id: call.invocation_id,
                     run_id: step.run_id,
                     step_id: step.id.clone(),
-                    message_id: tool_parents.get(&call.invocation_id).cloned().or_else(|| messages.last().map(|m| m.id.clone())).ok_or_else(|| StateError::Invalid("tool call requires a history message".into()))?,
+                    message_id: tool_parents
+                        .get(&call.invocation_id)
+                        .cloned()
+                        .or_else(|| messages.last().map(|m| m.id.clone()))
+                        .ok_or_else(|| {
+                            StateError::Invalid("tool call requires a history message".into())
+                        })?,
                     call_id: call.id.clone(),
                     tool_id: call.call_name.clone(),
                     tool_name: call.call_name.clone(),

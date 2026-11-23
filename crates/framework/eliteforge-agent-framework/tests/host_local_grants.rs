@@ -67,7 +67,10 @@ impl ChatModel for InvokeModel {
                     .tool_result
                     .as_ref()
                     .and_then(|result| result.structured.clone())
-                    .unwrap_or_else(|| json!({"error":message.content.protocol_text()})),
+                    .unwrap_or_else(|| {
+                        serde_json::from_str(&message.content.protocol_text())
+                            .unwrap_or_else(|_| json!({"error":message.content.protocol_text()}))
+                    }),
             );
             return Ok(ChatResponse::text("done"));
         }
@@ -87,6 +90,15 @@ impl ChatModel for InvokeModel {
 async fn invoke(agent: &Agent, session: &str, grant: Grant, name: &str, arguments: Value) -> Value {
     let mut request = RunRequest::new(session, "execute");
     request.extensions.insert(grant);
+    request.extensions.insert(
+        eliteforge_agent_official_plugin_tools_local::coordination::FileCoordinationIdentity(
+            eliteforge_agent_official_plugin_tools_local::coordination::FileSubject {
+                security_domain: "existing-grants-fixture".into(),
+                session_id: session.into(),
+                task_instance_id: "fixture".into(),
+            },
+        ),
+    );
     request.extensions.insert(Invocation {
         name: name.into(),
         arguments,
@@ -94,7 +106,18 @@ async fn invoke(agent: &Agent, session: &str, grant: Grant, name: &str, argument
     });
     let invocation = request.extensions.get::<Invocation>().unwrap();
     agent.run(request).await.unwrap();
-    invocation.output.lock().unwrap().take().unwrap()
+    let output = invocation.output.lock().unwrap().take().unwrap();
+    if output["kind"] == "toolBatch" || (name == "fs_read_text" && output["results"].is_array()) {
+        let item = &output["results"][0];
+        if item["isError"] == true {
+            return json!({"error": item["result"]});
+        }
+        item.get("result")
+            .cloned()
+            .unwrap_or_else(|| json!({"error":item}))
+    } else {
+        output
+    }
 }
 fn grant(cwd: PathBuf, roots: Vec<PathBuf>) -> Grant {
     Grant {
@@ -231,16 +254,16 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         "s",
         scope.clone(),
         "fs_read_text",
-        json!({"path":"value.txt"}),
+        json!({"items":[{"path":"value.txt"}]}),
     )
     .await;
-    assert_eq!(relative["content"], "from-b");
+    assert_eq!(relative["content"], "from-b", "{relative}");
     let absolute = invoke(
         &agent,
         "s",
         scope.clone(),
         "fs_read_text",
-        json!({"path":a.join("value.txt")}),
+        json!({"items":[{"path":a.join("value.txt")}]}),
     )
     .await;
     assert_eq!(absolute["content"], "from-a");
@@ -249,7 +272,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         "s",
         scope.clone(),
         "fs_read_text",
-        json!({"path":temp.path().join("outside.txt")}),
+        json!({"items":[{"path":temp.path().join("outside.txt")}]}),
     )
     .await;
     assert!(denied.to_string().contains("outside authorized roots"));
@@ -321,16 +344,24 @@ async fn context_patch_envelope_is_atomic_and_dry_run_does_not_write() {
         .build()
         .await
         .unwrap();
+    invoke(
+        &agent,
+        "p",
+        scope.clone(),
+        "fs_read_text",
+        json!({"items":[{"path":"a.txt"}]}),
+    )
+    .await;
     let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-before\n+after\n*** Add File: nested/new.txt\n+new\n*** End Patch";
     let preview = invoke(
         &agent,
         "p",
         scope.clone(),
         "fs_apply_patch",
-        json!({"patch":patch,"dryRun":true}),
+        json!({"mode":"patch","patch":patch,"dryRun":true}),
     )
     .await;
-    assert_eq!(preview["applied"], false);
+    assert_eq!(preview["status"], "notApplied");
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "before\n"
@@ -341,10 +372,10 @@ async fn context_patch_envelope_is_atomic_and_dry_run_does_not_write() {
         "p",
         scope.clone(),
         "fs_apply_patch",
-        json!({"patch":patch}),
+        json!({"mode":"patch","patch":patch}),
     )
     .await;
-    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["status"], "applied");
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "after\n"
@@ -354,7 +385,14 @@ async fn context_patch_envelope_is_atomic_and_dry_run_does_not_write() {
         "new\n"
     );
     let bad = "*** Begin Patch\n*** Delete File: a.txt\n*** Update File: nested/new.txt\n@@\n-missing\n+bad\n*** End Patch";
-    let rejected = invoke(&agent, "p", scope, "fs_apply_patch", json!({"patch":bad})).await;
+    let rejected = invoke(
+        &agent,
+        "p",
+        scope,
+        "fs_apply_patch",
+        json!({"mode":"patch","patch":bad}),
+    )
+    .await;
     assert!(rejected.get("error").is_some());
     assert!(
         root.join("a.txt").exists(),
@@ -389,7 +427,7 @@ async fn symlink_targets_must_stay_inside_the_host_grant() {
             "links",
             scope.clone(),
             "fs_read_text",
-            json!({"path":"inside.txt"})
+            json!({"items":[{"path":"inside.txt"}]})
         )
         .await["content"],
         "granted"
@@ -399,7 +437,7 @@ async fn symlink_targets_must_stay_inside_the_host_grant() {
         "links",
         scope,
         "fs_read_text",
-        json!({"path":"outside.txt"}),
+        json!({"items":[{"path":"outside.txt"}]}),
     )
     .await;
     assert!(denied.get("error").is_some(), "{denied}");

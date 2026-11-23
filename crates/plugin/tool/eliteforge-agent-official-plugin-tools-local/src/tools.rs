@@ -5,7 +5,7 @@ use eliteforge_agent_core::{RunContext, Tool, ToolBinding, ToolDescriptor, ToolE
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::edits::{self, Change};
+use crate::edits;
 use crate::filesystem::{FileSystemRoot, SystemCommandConfig};
 use crate::tasks::{
     CommandRequest, CommandTaskManager, INITIAL_READ_BYTES, MAX_READ_BYTES, MAX_READ_WAIT,
@@ -13,11 +13,12 @@ use crate::tasks::{
 
 pub(crate) fn read_only_bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding> {
     vec![
-        ToolBinding::new(
+        crate::coordinated_tools::binding(
             read_text_descriptor(),
-            ReadTextTool {
+            filesystem.clone(),
+            Some(std::sync::Arc::new(ReadTextTool {
                 filesystem: filesystem.clone(),
-            },
+            })),
         ),
         ToolBinding::new(
             list_descriptor(),
@@ -40,20 +41,9 @@ pub(crate) fn read_only_bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding>
 
 pub(crate) fn write_bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding> {
     vec![
-        ToolBinding::new(
-            write_text_descriptor(),
-            WriteTextTool {
-                filesystem: filesystem.clone(),
-            },
-        ),
-        ToolBinding::new(
-            patch_descriptor(),
-            PatchTool {
-                filesystem: filesystem.clone(),
-            },
-        ),
-        edits::binding(filesystem),
-    ].into_iter().map(|tool| tool.with_domain_code("fs")).collect()
+        crate::coordinated_tools::binding(write_text_descriptor(), filesystem.clone(), None),
+        crate::coordinated_tools::binding(patch_descriptor(), filesystem, None),
+    ]
 }
 
 pub(crate) fn system_command_bindings(
@@ -161,50 +151,28 @@ fn stat_descriptor() -> ToolDescriptor {
 }
 
 fn write_text_descriptor() -> ToolDescriptor {
-    ToolDescriptor::new(
-        "filesystem.write_text",
-        "fs_write_text",
-        "Create, overwrite, or append UTF-8 text below the configured filesystem root. Single-file operation: pass path and content directly, without an items array. Use separate calls for separate files.",
-        json!({
-            "type":"object", "additionalProperties":false, "required":["path", "content"],
-            "properties": {
-                "path":{"type":"string", "minLength":1},
-                "content":{"type":"string"},
-                "mode":{"type":"string", "enum":["create", "overwrite", "append"]},
-                "ensureParentDirs":{"type":"boolean"},
-                "expectedVersion":{"type":"string", "minLength":1}
-            }
-        }),
-    ).with_display_resource(include_str!("tool-display.json"))
-    .with_single_input()
-    .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ToolDescriptor::new("filesystem.write_text", "fs_write_text",
+        "Batch independent file creations, complete overwrites or appends in items. mode is required. Create requires absence; overwrite requires a complete current read; append uses the latest existing content. For small edits prefer fs_apply_patch mode=text; for related multi-file edits use mode=patch. No model-supplied versions.",
+        json!({"type":"object","additionalProperties":false,"required":["path","content","mode"],"properties":{
+            "path":{"type":"string","minLength":1},"content":{"type":"string"},
+            "mode":{"type":"string","enum":["create","overwrite","append"]}
+        }}))
+        .with_display_resource(include_str!("tool-display.json"))
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
-
 fn patch_descriptor() -> ToolDescriptor {
-    ToolDescriptor::new(
-        "filesystem.apply_patch",
-        "fs_apply_patch",
-        "Edit UTF-8 text using path/action/target, or a *** Begin Patch envelope to add/update/delete/move multiple files. Ambiguous contexts are rejected. dryRun previews envelopes without writing.",
-        json!({
-            "type":"object", "additionalProperties":false,
-            "oneOf":[
-                {"required":["patch"], "not":{"anyOf":[{"required":["path"]},{"required":["action"]},{"required":["target"]},{"required":["content"]},{"required":["replaceAll"]},{"required":["expectedCount"]},{"required":["expectedVersion"]}]}},
-                {"required":["path","action","target"], "not":{"anyOf":[{"required":["patch"]},{"required":["cwd"]},{"required":["dryRun"]}]}}
-            ],
-            "properties": {
-                "path":{"type":"string", "minLength":1},
-                "patch":{"type":"string","minLength":1,"maxLength":4194304},
-                "cwd":{"type":"string","minLength":1},
-                "dryRun":{"type":"boolean"},
-                "expectedCount":{"type":"integer","minimum":1},
-                "action":{"type":"string", "enum":["replace", "delete", "insert_before", "insert_after"]},
-                "target":{"type":"string", "minLength":1},
-                "content":{"type":"string"},
-                "replaceAll":{"type":"boolean"},
-                "expectedVersion":{"type":"string", "minLength":1}
-            }
-        }),
-    ).with_display_resource(include_str!("tool-display.json")).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ToolDescriptor::new("filesystem.apply_patch", "fs_apply_patch",
+        "Use mode=text for exact targeted replacements in one file; use mode=patch with a *** Begin Patch envelope for related multi-file add/update/delete/move operations. Read old text/context first. Unrelated concurrent edits are preserved when exact context still matches. Ambiguous contexts are rejected. dryRun only previews patch mode. No items wrapper or version fields.",
+        json!({"oneOf":[
+            {"type":"object","additionalProperties":false,"required":["mode","path","oldText","newText"],"properties":{
+                "mode":{"const":"text"},"path":{"type":"string","minLength":1},"oldText":{"type":"string","minLength":1},"newText":{"type":"string"},
+                "replaceAll":{"type":"boolean"},"expectedCount":{"type":"integer","minimum":1}}},
+            {"type":"object","additionalProperties":false,"required":["mode","patch"],"properties":{
+                "mode":{"const":"patch"},"patch":{"type":"string","minLength":1,"maxLength":4194304},"cwd":{"type":"string","minLength":1},"dryRun":{"type":"boolean"}}}
+        ]}))
+        .with_display_resource(include_str!("tool-display.json"))
+        .with_single_input()
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_descriptor() -> ToolDescriptor {
@@ -625,244 +593,6 @@ fn stat(filesystem: FileSystemRoot, input: StatInput) -> Result<ToolOutput, Tool
         is_symlink: metadata.file_type().is_symlink(),
         size_bytes: metadata.is_file().then_some(metadata.len()),
         readonly: metadata.permissions().readonly(),
-    })
-}
-
-#[derive(Clone)]
-struct WriteTextTool {
-    filesystem: FileSystemRoot,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WriteTextInput {
-    path: String,
-    content: String,
-    mode: Option<WriteMode>,
-    ensure_parent_dirs: Option<bool>,
-    expected_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum WriteMode {
-    Create,
-    Overwrite,
-    Append,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteTextOutput {
-    path: String,
-    mode: &'static str,
-    bytes_written: usize,
-    change: Value,
-}
-
-#[async_trait]
-impl Tool for WriteTextTool {
-    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
-        let input = parse(arguments)?;
-        let filesystem = self.filesystem.clone();
-        let context = context.clone();
-        blocking(move || {
-            edits::ensure_active(&context)?;
-            write_text(filesystem, input, &context)
-        })
-        .await
-    }
-}
-
-fn write_text(
-    filesystem: FileSystemRoot,
-    input: WriteTextInput,
-    context: &RunContext,
-) -> Result<ToolOutput, ToolError> {
-    let _guard = edits::lock();
-    let mut resolved = filesystem.resolve(&input.path)?;
-    if input.content.len() > filesystem.max_edit_bytes() {
-        return Err(ToolError::Failed("write exceeds max_edit_bytes".into()));
-    }
-    let before = edits::read(&resolved.path, filesystem.max_edit_bytes())?;
-    edits::check_version(before.as_deref(), input.expected_version.as_deref())?;
-    let mode = input.mode.unwrap_or(WriteMode::Overwrite);
-    if matches!(mode, WriteMode::Create) && before.is_some() {
-        return Err(ToolError::Failed("file already exists".into()));
-    }
-    if input.ensure_parent_dirs.unwrap_or(true)
-        && let Some(parent) = resolved.path.parent()
-    {
-        fs::create_dir_all(parent).map_err(|error| ToolError::Failed(error.to_string()))?;
-        resolved = filesystem.resolve(&input.path)?;
-    }
-    let mut after = if matches!(mode, WriteMode::Append) {
-        before.clone().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    after.extend_from_slice(input.content.as_bytes());
-    if after.len() > filesystem.max_edit_bytes() {
-        return Err(ToolError::Failed("write exceeds max_edit_bytes".into()));
-    }
-    let change = Change {
-        path: filesystem.display(&resolved.root, &resolved.path),
-        before,
-        after: Some(after),
-        permissions: None,
-    };
-    let preview = edits::preview(&change)?;
-    edits::commit(&filesystem, &[change], Some(context))?;
-    json_output(WriteTextOutput {
-        path: filesystem.display(&resolved.root, &resolved.path),
-        mode: match mode {
-            WriteMode::Create => "create",
-            WriteMode::Overwrite => "overwrite",
-            WriteMode::Append => "append",
-        },
-        bytes_written: input.content.len(),
-        change: preview,
-    })
-}
-
-#[derive(Clone)]
-struct PatchTool {
-    filesystem: FileSystemRoot,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PatchInput {
-    path: String,
-    action: PatchAction,
-    target: String,
-    content: Option<String>,
-    replace_all: Option<bool>,
-    expected_version: Option<String>,
-    expected_count: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PatchAction {
-    Replace,
-    Delete,
-    InsertBefore,
-    InsertAfter,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PatchOutput {
-    path: String,
-    action: &'static str,
-    replacements: usize,
-    change: Value,
-}
-
-#[async_trait]
-impl Tool for PatchTool {
-    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
-        if arguments.get("patch").is_some() {
-            let filesystem = self.filesystem.clone();
-            let context = context.clone();
-            return blocking(move || {
-                crate::patch_envelope::apply(&filesystem, arguments, &context)
-            })
-            .await;
-        }
-        let input = parse(arguments)?;
-        let filesystem = self.filesystem.clone();
-        let context = context.clone();
-        blocking(move || {
-            edits::ensure_active(&context)?;
-            patch(filesystem, input, &context)
-        })
-        .await
-    }
-}
-
-fn patch(
-    filesystem: FileSystemRoot,
-    input: PatchInput,
-    context: &RunContext,
-) -> Result<ToolOutput, ToolError> {
-    let _guard = edits::lock();
-    if input.target.is_empty() {
-        return Err(ToolError::Failed("target is required".into()));
-    }
-    let resolved = filesystem.resolve(&input.path)?;
-    let before = edits::read(&resolved.path, filesystem.max_edit_bytes())?
-        .ok_or_else(|| ToolError::Failed("file does not exist".into()))?;
-    edits::check_version(Some(&before), input.expected_version.as_deref())?;
-    let mut source = edits::text(&before)?.to_owned();
-    let replacement = input.content.unwrap_or_default();
-    let replace_all = input.replace_all.unwrap_or(false);
-    let occurrences = source.matches(&input.target).count();
-    if input
-        .expected_count
-        .is_some_and(|expected| expected != occurrences)
-        || (!replace_all && occurrences > 1)
-    {
-        return Err(ToolError::Failed(format!(
-            "target has {occurrences} matches; provide unique context or replaceAll with expectedCount"
-        )));
-    }
-    let count = if replace_all {
-        occurrences
-    } else {
-        occurrences.min(1)
-    };
-    let removed = if matches!(input.action, PatchAction::Replace | PatchAction::Delete) {
-        input.target.len()
-    } else {
-        0
-    };
-    let added = if matches!(input.action, PatchAction::Delete) {
-        0
-    } else {
-        replacement.len()
-    };
-    let projected = source
-        .len()
-        .saturating_sub(removed.saturating_mul(count))
-        .saturating_add(added.saturating_mul(count));
-    if projected > filesystem.max_edit_bytes() {
-        return Err(ToolError::Failed("patch exceeds max_edit_bytes".into()));
-    }
-    let replacements = match input.action {
-        PatchAction::Replace => {
-            replace_text(&mut source, &input.target, &replacement, replace_all)?
-        }
-        PatchAction::Delete => replace_text(&mut source, &input.target, "", replace_all)?,
-        PatchAction::InsertBefore => {
-            insert_text(&mut source, &input.target, &replacement, replace_all, true)?
-        }
-        PatchAction::InsertAfter => {
-            insert_text(&mut source, &input.target, &replacement, replace_all, false)?
-        }
-    };
-    if source.len() > filesystem.max_edit_bytes() {
-        return Err(ToolError::Failed("patch exceeds max_edit_bytes".into()));
-    }
-    let change = Change {
-        path: filesystem.display(&resolved.root, &resolved.path),
-        before: Some(before),
-        after: Some(source.into_bytes()),
-        permissions: None,
-    };
-    let preview = edits::preview(&change)?;
-    edits::commit(&filesystem, &[change], Some(context))?;
-    json_output(PatchOutput {
-        path: filesystem.display(&resolved.root, &resolved.path),
-        action: match input.action {
-            PatchAction::Replace => "replace",
-            PatchAction::Delete => "delete",
-            PatchAction::InsertBefore => "insert_before",
-            PatchAction::InsertAfter => "insert_after",
-        },
-        replacements,
-        change: preview,
     })
 }
 
@@ -1293,37 +1023,4 @@ fn walk_entries(
         }
     }
     Ok(false)
-}
-
-fn replace_text(
-    source: &mut String,
-    target: &str,
-    replacement: &str,
-    replace_all: bool,
-) -> Result<usize, ToolError> {
-    let occurrences = source.matches(target).count();
-    if occurrences == 0 {
-        return Err(ToolError::Failed("target text was not found".into()));
-    }
-    *source = if replace_all {
-        source.replace(target, replacement)
-    } else {
-        source.replacen(target, replacement, 1)
-    };
-    Ok(if replace_all { occurrences } else { 1 })
-}
-
-fn insert_text(
-    source: &mut String,
-    target: &str,
-    content: &str,
-    replace_all: bool,
-    before: bool,
-) -> Result<usize, ToolError> {
-    let replacement = if before {
-        format!("{content}{target}")
-    } else {
-        format!("{target}{content}")
-    };
-    replace_text(source, target, &replacement, replace_all)
 }
