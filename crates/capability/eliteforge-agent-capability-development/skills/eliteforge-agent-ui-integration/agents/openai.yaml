@@ -1,4 +1,4 @@
 interface:
   display_name: "EliteForge Agent UI 对接"
-  short_description: "指引 React/Vue/React Native 宿主通过 npm 对接 Agent UI 组件和运行契约"
+  short_description: "指引 React/Vue/React Native 与浏览器终端宿主通过 npm 对接 Agent UI 组件和运行契约"
   default_prompt: "使用 $eliteforge-agent-ui-integration 将 Agent UI 接入当前应用，并验证 npm 依赖、样式和宿主交互。"

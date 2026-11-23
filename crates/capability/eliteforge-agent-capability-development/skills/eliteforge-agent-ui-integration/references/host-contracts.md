@@ -127,6 +127,12 @@ const terminal = initTerminal({
 
 `clear()` 委托 xterm 清空缓冲区并保留当前提示行，不向 shell 发送命令，不停止 PTY 或删除宿主历史；`getSelection()` 未选中文本时返回空字符串；`focus()` 聚焦现有输入。三者保留主题和语言，销毁后不再调用。为宿主提供清屏/复制/聚焦按钮时，分别使用这些接口，并验证焦点、选择文本和终端连接仍正常。
 
+### 终端运行期工具详情（`1.0.0-preview.31`）
+
+终端活动区的思考、工具组和单个工具都使用原生 `<details>`。运行期间即可展开和收起；流式事件到达只更新标题和内容，不会把用户已展开的详情重新折叠，运行结束也不重置展开状态。展开后可查看工具参数和已经返回的结果，结果稍后到达时继续写入同一项。宿主升级到该版本后不再需要用 CSS 或事件拦截限制运行期点击。
+
+接入验收应在真实后端覆盖：工具仍在运行时可展开；工具已结束但整轮未结束时仍可展开；新事件到达后已展开项保持打开；“终止会话”仍能停止当前运行；结束后主题切换、终端输入和 `dispose()` 无回归。源码导航：`packages/terminal/src/terminal/ui/agentActivity.ts`、`packages/terminal/src/terminal/styles/model-session.scss`、终端 README。
+
 ### Compaction block details (since 1.0.0-preview.5)
 
 `ChatCompactionBlock` contains `id`, `beforeTokens`, `afterTokens` and `kind`
