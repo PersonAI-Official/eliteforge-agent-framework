@@ -212,6 +212,7 @@ fn system_command_descriptor() -> ToolDescriptor {
         "type":"object", "additionalProperties":false, "required":["command"],
         "properties": {
             "command":{"type":"string", "minLength":1, "description":"Complete command text. The host shell interprets quoting, lists, pipes, redirections and paths with spaces."},
+            "captureToFile":{"type":"boolean", "default":false, "description":"Save raw output as host-managed session files independently of the preview ring buffer."},
             "args":{"type":"array", "items":{"type":"string"}, "description":"Removed from the model contract. Kept only so legacy calls fail with an explicit retry message."},
             "cwd":{"type":"string", "minLength":1},
             "stdin":{"type":"string", "maxLength":65536},
@@ -226,7 +227,7 @@ fn system_command_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.exec",
         "command_exec",
-        "Run a complete command string in the authorized working directory. The host shell interprets chaining, pipes, redirections, quoting and paths with spaces. Returns taskId and captured output if still running after 10 seconds; use command_exec_read or command_exec_stop for the task. A nonzero exit code is a command result, not a tool failure. This is not a sandbox. For sudo=true supply the command without sudo; never put a password in tool arguments. args is not accepted.",
+        "Run a complete command string in the authorized working directory. The host shell interprets chaining, pipes, redirections, quoting and paths with spaces. Returns taskId and a 16 KiB preview per stream, including for completed commands. stdout/stderr are objects with content, pageStartCursor, nextCursor, endCursor, hasMore, droppedBytes, captureStatus and captureError. Follow nextCursor using command_exec_read until both streams have hasMore=false and captureStatus=eof; all pages from zero must have droppedBytes=0 to establish complete output. Ring buffers can discard older bytes. Set captureToFile=true to save output independently of the ring buffer; fileCapture reports status, capturedBytes, maxBytes, fileRef and error. saved means file publication succeeded, not that capture reached EOF: require captureStatus=eof and capturedBytes=endCursor too. Empty streams have no fileRef. File limits and failures are explicit. Use command_exec_stop to stop a task. A nonzero exit code is a command result, not a tool failure. This is not a sandbox. For sudo=true supply the command without sudo; never put a password in tool arguments. args is not accepted.",
         input_schema.clone(),
     )
     .with_model_input_schema(command_model_schema(input_schema))
@@ -245,7 +246,7 @@ fn system_command_task_read_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.task.read",
         "command_exec_read",
-        "Read a command task's status and the next stdout/stderr bytes using the returned cursors. A short waitMs can wait for more output. Tasks are available only in the session that started them.",
+        "Read a command task preview, including after process completion. Pass stdout.nextCursor/stderr.nextCursor as stdoutCursor/stderrCursor. hasMore means more captured bytes remain; captureStatus=eof means that stream reached EOF, not that the page contains everything. droppedBytes reports a gap from the requested cursor; discarded bytes cannot be recovered from memory. maxBytes is per stream (a UTF-8 scalar may exceed it by up to 3 bytes). A short waitMs can wait for more output. Tasks are available only in the session that started them.",
         json!({
             "type":"object", "additionalProperties":false, "required":["taskId"],
             "properties": {
@@ -875,6 +876,8 @@ struct SystemCommandTool {
 struct SystemCommandInput {
     command: String,
     #[serde(default)]
+    capture_to_file: bool,
+    #[serde(default)]
     args: Option<Vec<String>>,
     cwd: Option<String>,
     stdin: Option<String>,
@@ -950,8 +953,25 @@ impl Tool for SystemCommandTool {
                 "PTY rows and cols must be between 1 and 1000".into(),
             ));
         }
+        let capture = if input.capture_to_file {
+            let provider = context
+                .extensions
+                .get::<crate::CommandOutputCaptureService>()
+                .ok_or_else(|| {
+                    ToolError::Failed(
+                        "this host does not provide command output file capture".into(),
+                    )
+                })?;
+            Some((
+                provider.0.create("stdout", context).await?,
+                provider.0.create("stderr", context).await?,
+            ))
+        } else {
+            None
+        };
         let task = self.tasks.start(
             CommandRequest {
+                capture,
                 env_remove: Vec::new(),
                 session_id: context.session_id.clone(),
                 command,

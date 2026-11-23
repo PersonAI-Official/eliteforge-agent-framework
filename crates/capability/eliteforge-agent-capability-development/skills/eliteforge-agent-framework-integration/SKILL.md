@@ -2,14 +2,14 @@
 name: eliteforge-agent-framework-integration
 description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用、插件、工具与能力包。新建 Tron 能力包时先调用随技能提供的生成器创建完整骨架，再填写业务内容；提供模型、上下文、Skills、MCP、审批、持久化、流式输出教程，以及 Tron 菜单编码与导航校验。
 metadata:
-  version: 1.3.0
+  version: 1.4.0
 ---
 
 # EliteForge Agent Framework 使用手册
 
 本技能由 Framework 的 `eliteforge.agent-development` 能力包统一维护和分发；更新 Framework 接口时，同步此目录的说明、references 和模板。
 
-本技能的 API 基线为 Git tag `1.0.0`。正文和随附章节包含实现所需的代码，无需先取得 Framework 仓库或阅读 `docs/`。仅在目标项目使用其他版本、接口不匹配或需要修改框架内部实现时，查实际锁定版本的源码。
+本技能的 API 基线为携带此技能能力包的 Framework 提交，以宿主 Cargo.lock 锁定版本为准。正文和随附章节包含实现所需的代码，无需先取得 Framework 仓库或阅读 `docs/`。仅在目标项目使用其他版本、接口不匹配或需要修改框架内部实现时，查实际锁定版本的源码。
 
 执行任务时，先读目标项目的 Cargo 清单与装配入口，再按下方教程实现。已有应用沿用其配置、目录和身份体系，不照搬示例的数据和全局作用域。
 

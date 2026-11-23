@@ -304,8 +304,8 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
             "command_exec_read",
             json!({
                 "taskId": task_id,
-                "stdoutCursor": started["stdoutCursor"],
-                "stderrCursor": started["stderrCursor"],
+                "stdoutCursor": started["stdout"]["nextCursor"],
+                "stderrCursor": started["stderr"]["nextCursor"],
                 "waitMs": 1000
             }),
         )
@@ -313,8 +313,8 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
         .unwrap();
     let all_output = format!(
         "{}{}",
-        started["stdout"].as_str().unwrap(),
-        next["stdout"].as_str().unwrap(),
+        started["stdout"]["content"].as_str().unwrap(),
+        next["stdout"]["content"].as_str().unwrap(),
     );
     assert!(all_output.contains("first\nsecond\n"));
     let stopped = harness
@@ -323,15 +323,15 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
             "command_exec_stop",
             json!({
                 "taskId": task_id,
-                "stdoutCursor": next["stdoutCursor"],
-                "stderrCursor": next["stderrCursor"]
+                "stdoutCursor": next["stdout"]["nextCursor"],
+                "stderrCursor": next["stderr"]["nextCursor"]
             }),
         )
         .await
         .unwrap();
     assert_eq!(stopped["status"], "cancelled");
     assert_eq!(stopped["stopRequested"], true);
-    assert_eq!(stopped["stdout"], "");
+    assert_eq!(stopped["stdout"]["content"], "");
     assert!(harness.agent.framework().close().await.is_success());
 }
 
@@ -384,7 +384,7 @@ async fn closing_framework_terminates_its_background_command() {
         )
         .await
         .unwrap();
-    let pid: u32 = running["stdout"].as_str().unwrap().trim().parse().unwrap();
+    let pid: u32 = running["stdout"]["content"].as_str().unwrap().trim().parse().unwrap();
     let is_running = || {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -619,7 +619,7 @@ async fn system_command_pack_uses_platform_native_command_runners() {
     .await;
     assert_eq!(output["success"], json!(true));
     assert!(
-        output["stdout"]
+        output["stdout"]["content"]
             .as_str()
             .expect("command output should be text")
             .contains("cross-platform")
@@ -656,7 +656,7 @@ async fn system_command_pack_accepts_an_arbitrary_working_directory() {
     .await;
 
     let actual = std::fs::canonicalize(
-        output["stdout"]
+        output["stdout"]["content"]
             .as_str()
             .expect("command output should be text")
             .trim(),
@@ -761,7 +761,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
         .await
         .unwrap();
     let finished = command_until_terminal(&harness, id).await;
-    assert_eq!(finished["stdout"], "first=hello\nworld\n");
+    assert_eq!(finished["stdout"]["content"], "first=hello\nworld\n");
     assert_eq!(finished["success"], true);
     assert_eq!(finished["stdinOpen"], false);
     assert!(
@@ -813,11 +813,11 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
         .unwrap();
     let finished = command_until_terminal(&harness, id).await;
     assert_eq!(finished["success"], true, "{finished}");
-    let output = finished["stdout"].as_str().unwrap().replace("\r\n", "\n");
+    let output = finished["stdout"]["content"].as_str().unwrap().replace("\r\n", "\n");
     assert!(output.contains("40 100\n"), "{output}");
     assert!(output.contains("answer=terminal-value\n"), "{output}");
     assert!(output.contains("error-stream\n"), "{output}");
-    assert_eq!(finished["stderr"], "");
+    assert_eq!(finished["stderr"]["content"], "");
     assert!(harness.agent.framework().close().await.is_success());
 }
 
@@ -839,7 +839,7 @@ async fn stopping_pipe_and_pty_commands_cleans_their_process_groups() {
             )
             .await
             .unwrap();
-        let output = started["stdout"].as_str().unwrap().trim();
+        let output = started["stdout"]["content"].as_str().unwrap().trim();
         let descendant: u32 = output.parse().expect("shell should report child pid");
         let stopped = harness
             .call(
@@ -878,7 +878,7 @@ async fn timeout_and_framework_close_clean_managed_descendants() {
             )
             .await
             .unwrap();
-        let descendant: u32 = started["stdout"].as_str().unwrap().trim().parse().unwrap();
+        let descendant: u32 = started["stdout"]["content"].as_str().unwrap().trim().parse().unwrap();
         if timed_out {
             let finished = command_until_terminal(&harness, &started["taskId"]).await;
             assert_eq!(finished["status"], "timed_out");
@@ -904,7 +904,7 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
         .await
         .unwrap();
     assert_eq!(finished["status"], "completed");
-    assert_process_gone(finished["stdout"].as_str().unwrap().trim().parse().unwrap()).await;
+    assert_process_gone(finished["stdout"]["content"].as_str().unwrap().trim().parse().unwrap()).await;
     let finished = harness
         .call(
             "owner",
@@ -913,7 +913,7 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
         )
         .await
         .unwrap();
-    assert_eq!(finished["stdout"], "one-shot\n");
+    assert_eq!(finished["stdout"]["content"], "one-shot\n");
     assert_eq!(finished["success"], true);
     assert!(harness.agent.framework().close().await.is_success());
 }

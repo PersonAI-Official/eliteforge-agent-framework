@@ -78,7 +78,7 @@
       },
       "zh-CN": {
         "name": "执行命令",
-        "description": "执行完整命令字符串；命令串联、管道、重定向和含空格路径由宿主命令解释器处理。非零退出码属于命令结果，不是工具调用失败。"
+        "description": "在授权工作目录执行完整命令。每路输出返回默认 16KiB 预览及分页元数据，进程完成后仍可能需要续读。按 nextCursor 续读；从零连续读取、所有页 droppedBytes 为零、两路 hasMore 为 false 且 captureStatus 为 eof 时才是完整输出。captureToFile 可独立保存会话附件；检查 fileCapture 状态与采集状态，容量超限及写入失败会明确报告。"
       }
     },
     "system.command.task.read": {
@@ -88,7 +88,7 @@
       },
       "zh-CN": {
         "name": "读取命令输出",
-        "description": "读取当前会话中命令任务的状态和最新输出，可短暂等待。"
+        "description": "按 stdout.nextCursor、stderr.nextCursor 续读命令输出，包括已完成的命令。hasMore 表示还有已采集内容，droppedBytes 表示请求位置后的数据缺口；captureStatus 为 eof 才表示正常采集结束。UTF-8 字符可能使单页超出字节预算最多 3 字节。"
       }
     },
     "system.command.task.stop": {
@@ -235,7 +235,8 @@
       "/properties/name": "Resource name",
       "/properties/text": "Text content",
       "/properties/terminalId": "Terminal ID",
-      "/properties/cursor": "Output cursor"
+      "/properties/cursor": "Output cursor",
+      "/properties/captureToFile": "Capture output to session files"
     },
     "zh-CN": {
       "/properties/path": "文件路径",
@@ -279,7 +280,8 @@
       "/properties/name": "资源名称",
       "/properties/text": "文本内容",
       "/properties/terminalId": "终端编号",
-      "/properties/cursor": "输出游标"
+      "/properties/cursor": "输出游标",
+      "/properties/captureToFile": "保存完整输出到会话文件"
     }
   }
 }

@@ -34,6 +34,7 @@ pub async fn capture_command(spec: CapturedCommand) -> Result<serde_json::Value,
     let _guard = Stop(manager.clone());
     let task = manager.start(
         CommandRequest {
+            capture: None,
             session_id: "host-capture".into(),
             command: spec.program,
             args: spec.args,

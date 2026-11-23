@@ -206,7 +206,7 @@ async fn commands_from_one_model_batch_execute_concurrently() {
     assert_eq!(outputs.len(), 3);
     for (index, output) in outputs.iter().enumerate() {
         assert_eq!(output["exitCode"], 0, "command {index}: {output}");
-        assert_eq!(output["stdout"], format!("ready-{index}"));
+        assert_eq!(output["stdout"]["content"], format!("ready-{index}"));
     }
     assert!(agent.framework().close().await.is_success());
 }

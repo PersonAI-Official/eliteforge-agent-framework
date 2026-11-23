@@ -30,6 +30,7 @@ const MAX_INPUT_BYTES: usize = 64 * 1024;
 type InputControl = Arc<Mutex<Option<mpsc::Sender<InputMessage>>>>;
 
 pub(crate) struct CommandRequest {
+    pub capture: Option<(crate::CommandOutputFile, crate::CommandOutputFile)>,
     pub session_id: String,
     pub command: String,
     pub args: Vec<String>,
@@ -350,7 +351,15 @@ fn pump_pty_output(
     let mut buffer = [0; 8192];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                lock(&output).finish(CaptureStatus::Eof, None);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                lock(&output).finish(CaptureStatus::ReadError, Some(error.to_string()));
+                break;
+            }
             Ok(count) => {
                 lock(&output).push(&buffer[..count], limit.max(1));
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -367,7 +376,7 @@ pub(crate) struct CommandTaskManager {
 impl CommandTaskManager {
     pub(crate) fn start(
         &self,
-        request: CommandRequest,
+        mut request: CommandRequest,
         timeout_limit: Duration,
         output_limit: usize,
     ) -> Result<Arc<CommandTask>, ToolError> {
@@ -390,8 +399,15 @@ impl CommandTaskManager {
         let (state_tx, _) = watch::channel(CommandTaskState::running());
         let (changes_tx, _) = watch::channel(0_u64);
         let (stop_tx, stop_rx) = watch::channel(false);
-        let stdout_buffer = Arc::new(Mutex::new(BoundedOutput::default()));
-        let stderr_buffer = Arc::new(Mutex::new(BoundedOutput::default()));
+        let (stdout_capture, stderr_capture) = match request.capture.take() {
+            Some((stdout, stderr)) => (Some(stdout), Some(stderr)),
+            None => (None, None),
+        };
+        let stdout_buffer = Arc::new(Mutex::new(BoundedOutput::new(stdout_capture)));
+        let stderr_buffer = Arc::new(Mutex::new(BoundedOutput::new(stderr_capture)));
+        if request.tty {
+            lock(&stderr_buffer).finish(CaptureStatus::Eof, None);
+        }
         let process = RunningCommand::spawn(
             &request,
             stdout_buffer.clone(),
@@ -415,8 +431,8 @@ impl CommandTaskManager {
             changes_tx: changes_tx.clone(),
             stop_tx,
             monitor: Mutex::new(None),
-            stdout: stdout_buffer,
-            stderr: stderr_buffer,
+            stdout: stdout_buffer.clone(),
+            stderr: stderr_buffer.clone(),
         });
         let monitor = tokio::spawn(supervise(
             process,
@@ -424,6 +440,8 @@ impl CommandTaskManager {
             changes_tx,
             stop_rx,
             timeout_limit,
+            stdout_buffer,
+            stderr_buffer,
         ));
         *lock(&task.monitor) = Some(monitor);
         tasks.insert(task_id, task.clone());
@@ -620,8 +638,13 @@ impl CommandTask {
     ) {
         let mut changes = self.changes_tx.subscribe();
         let revision = *changes.borrow_and_update();
-        let has_output = lock(&self.stdout).end_cursor > stdout_cursor
-            || lock(&self.stderr).end_cursor > stderr_cursor;
+        let has_output = [&self.stdout, &self.stderr]
+            .into_iter()
+            .zip([stdout_cursor, stderr_cursor])
+            .any(|(stream, cursor)| {
+                let page = lock(stream).read(cursor, MAX_READ_BYTES);
+                !page.content.is_empty() || page.dropped_bytes > 0
+            });
         if has_output || self.state_tx.borrow().status.is_terminal() || max_wait.is_zero() {
             return;
         }
@@ -664,14 +687,8 @@ impl CommandTask {
             success: state.success,
             exit_code: state.exit_code,
             error: state.error.clone(),
-            stdout: stdout.content,
-            stdout_cursor: stdout.next_cursor,
-            stdout_start_cursor: stdout.start_cursor,
-            stdout_truncated: stdout.truncated,
-            stderr: stderr.content,
-            stderr_cursor: stderr.next_cursor,
-            stderr_start_cursor: stderr.start_cursor,
-            stderr_truncated: stderr.truncated,
+            stdout,
+            stderr,
             stop_requested: None,
             tty: self.tty,
             pid: self.pid,
@@ -755,14 +772,8 @@ pub(crate) struct CommandTaskOutput {
     success: Option<bool>,
     exit_code: Option<i32>,
     error: Option<String>,
-    stdout: String,
-    stdout_cursor: u64,
-    stdout_start_cursor: u64,
-    stdout_truncated: bool,
-    stderr: String,
-    stderr_cursor: u64,
-    stderr_start_cursor: u64,
-    stderr_truncated: bool,
+    stdout: OutputPage,
+    stderr: OutputPage,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_requested: Option<bool>,
     tty: bool,
@@ -771,14 +782,16 @@ pub(crate) struct CommandTaskOutput {
 }
 
 impl CommandTaskOutput {
-    pub(crate) fn stderr_contains(&self, marker: &str) -> bool { self.stderr.contains(marker) }
+    pub(crate) fn stderr_contains(&self, marker: &str) -> bool {
+        self.stderr.content.contains(marker)
+    }
 
     pub(crate) fn progress(&self) -> (&str, &str, u64, u64, bool) {
         (
-            &self.stdout,
-            &self.stderr,
-            self.stdout_cursor,
-            self.stderr_cursor,
+            &self.stdout.content,
+            &self.stderr.content,
+            self.stdout.next_cursor,
+            self.stderr.next_cursor,
             self.status.is_terminal(),
         )
     }
@@ -789,55 +802,215 @@ impl CommandTaskOutput {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureStatus {
+    Running,
+    Eof,
+    ReadError,
+    DrainTimeout,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileCaptureMetadata {
+    status: &'static str,
+    captured_bytes: u64,
+    max_bytes: u64,
+    file_ref: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
 struct BoundedOutput {
     bytes: VecDeque<u8>,
     end_cursor: u64,
-    truncated: bool,
+    capture_status: CaptureStatus,
+    capture_error: Option<String>,
+    file: Option<crate::CommandOutputFile>,
+    file_capture: Option<FileCaptureMetadata>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OutputPage {
     content: String,
+    page_start_cursor: u64,
     next_cursor: u64,
-    start_cursor: u64,
-    truncated: bool,
+    end_cursor: u64,
+    has_more: bool,
+    dropped_bytes: u64,
+    capture_status: CaptureStatus,
+    capture_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_capture: Option<FileCaptureMetadata>,
 }
 
 impl BoundedOutput {
-    fn push(&mut self, incoming: &[u8], capacity: usize) {
-        self.end_cursor += incoming.len() as u64;
-        if incoming.len() >= capacity {
-            self.bytes.clear();
-            self.bytes.extend(&incoming[incoming.len() - capacity..]);
-            self.truncated = true;
-            return;
-        }
-        self.bytes.extend(incoming);
-        while self.bytes.len() > capacity {
-            self.bytes.pop_front();
-            self.truncated = true;
+    fn new(file: Option<crate::CommandOutputFile>) -> Self {
+        let file_capture = file.as_ref().map(|file| FileCaptureMetadata {
+            status: "writing",
+            captured_bytes: 0,
+            max_bytes: file.max_bytes,
+            file_ref: None,
+            error: None,
+        });
+        Self {
+            bytes: VecDeque::new(),
+            end_cursor: 0,
+            capture_status: CaptureStatus::Running,
+            capture_error: None,
+            file,
+            file_capture,
         }
     }
 
+    fn finish(&mut self, status: CaptureStatus, error: Option<String>) {
+        if self.capture_status == CaptureStatus::Running {
+            self.capture_status = status;
+            self.capture_error = error;
+        }
+    }
+
+    fn push(&mut self, incoming: &[u8], capacity: usize) {
+        // A blocking PTY reader can outlive its drain deadline. Freeze the
+        // snapshot before publishing files so no bytes arrive after finalization.
+        if self.capture_status != CaptureStatus::Running {
+            return;
+        }
+        if let (Some(file), Some(meta)) = (&mut self.file, &mut self.file_capture)
+            && meta.status == "writing"
+        {
+            let count = incoming
+                .len()
+                .min(meta.max_bytes.saturating_sub(meta.captured_bytes) as usize);
+            let mut written = 0;
+            while written < count {
+                match std::io::Write::write(&mut file.writer, &incoming[written..count]) {
+                    Ok(0) => {
+                        meta.status = "write_error";
+                        meta.error = Some("output file writer made no progress".into());
+                        break;
+                    }
+                    Ok(bytes) => {
+                        written += bytes;
+                        meta.captured_bytes += bytes as u64;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        meta.status = "write_error";
+                        meta.error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            if meta.status == "writing" && count < incoming.len() {
+                meta.status = "limit_exceeded";
+            }
+        }
+        self.end_cursor += incoming.len() as u64;
+        self.bytes.extend(incoming);
+        let excess = self.bytes.len().saturating_sub(capacity);
+        self.bytes.drain(..excess);
+    }
+
     fn read(&self, cursor: u64, max_bytes: usize) -> OutputPage {
-        let start_cursor = self.end_cursor.saturating_sub(self.bytes.len() as u64);
-        let effective_cursor = cursor.clamp(start_cursor, self.end_cursor);
-        let offset = (effective_cursor - start_cursor) as usize;
-        let count = (self.bytes.len() - offset).min(max_bytes);
-        let bytes: Vec<_> = self
+        let retained_start = self.end_cursor.saturating_sub(self.bytes.len() as u64);
+        let effective_cursor = cursor.clamp(retained_start, self.end_cursor);
+        let mut offset = (effective_cursor - retained_start) as usize;
+        // Never start in the middle of a valid UTF-8 scalar after eviction.
+        while offset < self.bytes.len() && self.bytes[offset] & 0xc0 == 0x80 {
+            offset += 1;
+        }
+        let mut end = (offset + max_bytes.max(1)).min(self.bytes.len());
+        if end < self.bytes.len() && self.bytes[end] & 0xc0 == 0x80 {
+            while end > offset && self.bytes[end] & 0xc0 == 0x80 {
+                end -= 1;
+            }
+            // A page budget smaller than one scalar may exceed its budget by
+            // up to three bytes so even maxBytes=1 makes forward progress.
+            if end == offset {
+                end = (offset + max_bytes.max(1)).min(self.bytes.len());
+                while end < self.bytes.len() && self.bytes[end] & 0xc0 == 0x80 {
+                    end += 1;
+                }
+            }
+        }
+        let mut bytes: Vec<_> = self
             .bytes
             .iter()
             .skip(offset)
-            .take(count)
+            .take(end - offset)
             .copied()
             .collect();
+        if self.capture_status == CaptureStatus::Running {
+            // A read can observe a pipe chunk ending mid-scalar. Keep its
+            // incomplete suffix for the next page, including after invalid bytes.
+            let mut valid = 0;
+            while valid < bytes.len() {
+                match std::str::from_utf8(&bytes[valid..]) {
+                    Ok(_) => break,
+                    Err(error) => match error.error_len() {
+                        Some(length) => valid += error.valid_up_to() + length,
+                        None => {
+                            bytes.truncate(valid + error.valid_up_to());
+                            break;
+                        }
+                    },
+                }
+            }
+        }
+        let page_start_cursor = retained_start + offset as u64;
+        let next_cursor = page_start_cursor + bytes.len() as u64;
         OutputPage {
             content: String::from_utf8_lossy(&bytes).into_owned(),
-            next_cursor: effective_cursor + count as u64,
-            start_cursor,
-            truncated: self.truncated,
+            page_start_cursor,
+            next_cursor,
+            end_cursor: self.end_cursor,
+            has_more: next_cursor < self.end_cursor,
+            dropped_bytes: page_start_cursor.saturating_sub(cursor),
+            capture_status: self.capture_status,
+            capture_error: self.capture_error.clone(),
+            file_capture: self.file_capture.clone(),
         }
     }
+}
+
+async fn publish_capture(output: Arc<Mutex<BoundedOutput>>) {
+    let file = lock(&output).file.take();
+    let Some(mut file) = file else {
+        return;
+    };
+    let mut meta = lock(&output)
+        .file_capture
+        .clone()
+        .expect("capture metadata");
+    let result = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        file.writer.flush().map_err(|error| error.to_string())?;
+        // Empty streams have no attachment; the zero byte count is explicit.
+        if meta.captured_bytes == 0 && meta.status != "write_error" {
+            return Ok(None);
+        }
+        file.writer.publish().map(Some)
+    })
+    .await;
+    match result {
+        Ok(Ok(reference)) => {
+            meta.file_ref = reference;
+            if meta.status == "writing" {
+                meta.status = "saved";
+            }
+        }
+        error => {
+            meta.status = "publish_error";
+            meta.error = Some(match error {
+                Ok(Err(error)) => error,
+                Err(error) => error.to_string(),
+                _ => unreachable!(),
+            });
+        }
+    }
+    lock(&output).file_capture = Some(meta);
 }
 
 async fn pump_output<R>(
@@ -851,7 +1024,15 @@ async fn pump_output<R>(
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                lock(&output).finish(CaptureStatus::Eof, None);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                lock(&output).finish(CaptureStatus::ReadError, Some(error.to_string()));
+                break;
+            }
             Ok(count) => {
                 lock(&output).push(&buffer[..count], limit.max(1));
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -866,6 +1047,8 @@ async fn supervise(
     changes: watch::Sender<u64>,
     mut stop: watch::Receiver<bool>,
     timeout_limit: Duration,
+    stdout: Arc<Mutex<BoundedOutput>>,
+    stderr: Arc<Mutex<BoundedOutput>>,
 ) {
     let terminal_state = tokio::select! {
         result = process.child.wait() => match result {
@@ -884,15 +1067,18 @@ async fn supervise(
     lock(&process.input).take();
     // ConPTY closes after its output reader has started draining.
     let drain = async {
-        for reader in [
-            &mut process.stdout_reader,
-            &mut process.stderr_reader,
-            &mut process.stdin_writer,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let _ = reader.await;
+        for (reader, output) in [
+            (&mut process.stdout_reader, &stdout),
+            (&mut process.stderr_reader, &stderr),
+        ] {
+            if let Some(reader) = reader
+                && let Err(error) = reader.await
+            {
+                lock(output).finish(CaptureStatus::ReadError, Some(error.to_string()));
+            }
+        }
+        if let Some(writer) = &mut process.stdin_writer {
+            let _ = writer.await;
         }
     };
     if timeout(OUTPUT_DRAIN_TIMEOUT, drain).await.is_err() {
@@ -907,6 +1093,14 @@ async fn supervise(
             reader.abort();
         }
     }
+    for output in [&stdout, &stderr] {
+        lock(output).finish(
+            CaptureStatus::DrainTimeout,
+            Some("output reader did not reach EOF before the drain deadline".into()),
+        );
+    }
+    // Publish outside stream locks and runtime worker threads.
+    tokio::join!(publish_capture(stdout), publish_capture(stderr));
     state.send_replace(terminal_state);
     changes.send_modify(|revision| *revision = revision.wrapping_add(1));
 }

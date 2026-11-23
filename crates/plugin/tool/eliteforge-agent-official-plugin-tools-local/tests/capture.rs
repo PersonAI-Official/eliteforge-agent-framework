@@ -21,8 +21,8 @@ async fn capture_preserves_streams_exit_status_and_environment_policy() {
     ))
     .await
     .unwrap();
-    assert_eq!(result["stdout"], "literal; $(touch injected)");
-    assert_eq!(result["stderr"], "unset");
+    assert_eq!(result["stdout"]["content"], "literal; $(touch injected)");
+    assert_eq!(result["stderr"]["content"], "unset");
     assert_eq!(result["exitCode"], 7);
     assert!(!dir.path().join("injected").exists());
 }

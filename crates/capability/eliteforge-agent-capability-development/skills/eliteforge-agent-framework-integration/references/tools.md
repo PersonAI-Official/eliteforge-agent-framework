@@ -200,3 +200,9 @@ request.extensions.insert(eliteforge_agent_core::NativeToolWhitelist::new()
 ```
 
 原生工具仍走同一 binding、权限、审批、批量拆解和审计链路，调用时沿用 `{"items":[...]}` 契约（单项工具除外）。白名单默认为空，网关工具列表保持“三个基础入口 + 白名单中可用的原生工具”的确定性排序。
+
+### 命令输出完整性与文件捕获
+
+`command_exec` 默认只返回 stdout/stderr 各 16KiB 的预览，即使进程已完成也不能直接当作全量。两路输出现在都是对象：`content`、`pageStartCursor`、`nextCursor`、`endCursor`、`hasMore`、`droppedBytes`、`captureStatus`、`captureError`，不再提供旧游标和 Truncated 字段。把 `stdout.nextCursor`／`stderr.nextCursor` 传给 `command_exec_read` 的 `stdoutCursor`／`stderrCursor`。从零连续读取、所有页无丢失、两路正常 EOF 且无后续，才是完整输出。`captureStatus` 为 `running`、`eof`、`read_error` 或 `drain_timeout`；不要用进程退出状态替代采集状态。游标按原始字节计数，页边界保留完整 UTF-8 字符；小预算可能超出最多 3 字节。
+
+大输出设置 `captureToFile: true`，宿主须在运行扩展注入 `CommandOutputCaptureService(Arc<dyn CommandOutputCaptureProvider>)`。Provider 的 `create(stream, run)` 返回 `CommandOutputFile { writer, max_bytes }`，writer 实现 `Write + CommandOutputWriter`，`publish()` 返回当前会话可读取的 `fileRef`；临时文件在 drop 时清理，已发布文件沿用会话资源生命周期。Tron 使用会话附件实现此服务。stdout/stderr 的 `fileCapture` 包含 `status`（`writing`、`saved`、`limit_exceeded`、`write_error`、`publish_error`）、`capturedBytes`、`maxBytes`、`fileRef`、`error`。文件独立于内存缓冲保存，正常 EOF、`saved` 且 `capturedBytes == endCursor` 才可认定文件完整；空流不生成附件，fileRef 为 null。文件超限、失败、取消及读取异常仍可保留部分文件，但不得把它当作完整证据。宿主不提供服务时，显式请求文件捕获会在进程启动前报错。

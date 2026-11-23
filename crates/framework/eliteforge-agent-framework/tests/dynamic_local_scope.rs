@@ -221,7 +221,7 @@ async fn same_run_scope_switch_changes_fs_command_and_pty_without_losing_task_ow
     assert_eq!(out[0]["content"], "from-a");
     assert_eq!(out[2]["content"], "from-b");
     assert!(
-        out[3]["stdout"]
+        out[3]["stdout"]["content"]
             .as_str()
             .unwrap()
             .contains(s.b.to_str().unwrap())

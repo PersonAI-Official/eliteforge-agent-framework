@@ -7,6 +7,11 @@ pub const TOOL_IMPLEMENTATION_DESCRIPTION: &str =
     "Provides workspace-scoped filesystem, command and shared PTY capabilities.";
 
 pub mod capture;
+mod output_capture;
+pub use output_capture::{
+    CommandOutputCaptureProvider, CommandOutputCaptureService, CommandOutputFile,
+    CommandOutputWriter,
+};
 mod edits;
 mod filesystem;
 mod patch_envelope;
