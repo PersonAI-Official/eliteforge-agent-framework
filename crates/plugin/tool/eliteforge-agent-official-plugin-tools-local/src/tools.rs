@@ -163,7 +163,7 @@ fn write_text_descriptor() -> ToolDescriptor {
 fn patch_descriptor() -> ToolDescriptor {
     ToolDescriptor::new("filesystem.apply_patch", "fs_apply_patch",
         "Use mode=text for exact targeted replacements in one file; use mode=patch with a *** Begin Patch envelope for related multi-file add/update/delete/move operations. Read old text/context first. Unrelated concurrent edits are preserved when exact context still matches. Ambiguous contexts are rejected. dryRun only previews patch mode. No items wrapper or version fields.",
-        json!({"oneOf":[
+        json!({"type":"object","oneOf":[
             {"type":"object","additionalProperties":false,"required":["mode","path","oldText","newText"],"properties":{
                 "mode":{"const":"text"},"path":{"type":"string","minLength":1},"oldText":{"type":"string","minLength":1},"newText":{"type":"string"},
                 "replaceAll":{"type":"boolean"},"expectedCount":{"type":"integer","minimum":1}}},
@@ -294,6 +294,7 @@ struct ReadTextOutput {
     start_line: usize,
     end_line: usize,
     version: String,
+    total_lines: usize,
     truncated: bool,
 }
 
@@ -444,6 +445,7 @@ fn render_text(
         start_line,
         end_line: last_line,
         version,
+        total_lines: source.lines().count(),
         truncated,
     })
 }

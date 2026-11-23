@@ -213,11 +213,12 @@ impl Plugin for ReadOnlyFileSystemPlugin {
     }
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let coordination = coordination::CoordinationSelection::register(self.id(), context)?;
         ToolProviderPlugin::new(
             self.id(),
             Self {
                 filesystem: self.filesystem.fresh(),
-                coordination: self.coordination.clone(),
+                coordination,
             },
         )
         .install(context)
@@ -227,7 +228,7 @@ impl Plugin for ReadOnlyFileSystemPlugin {
         &self,
         context: &mut eliteforge_agent_core::PluginReadyContext<'_>,
     ) -> Result<(), PluginError> {
-        self.coordination.ready(context);
+        coordination::CoordinationSelection::ready_registered(self.id(), context);
         Ok(())
     }
 }
@@ -297,15 +298,22 @@ impl Plugin for WriteFileSystemPlugin {
     }
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        ToolProviderPlugin::new(self.id(), self.clone())
-            .install(context)
-            .await
+        let coordination = coordination::CoordinationSelection::register(self.id(), context)?;
+        ToolProviderPlugin::new(
+            self.id(),
+            Self {
+                filesystem: self.filesystem.fresh(),
+                coordination,
+            },
+        )
+        .install(context)
+        .await
     }
     async fn ready(
         &self,
         context: &mut eliteforge_agent_core::PluginReadyContext<'_>,
     ) -> Result<(), PluginError> {
-        self.coordination.ready(context);
+        coordination::CoordinationSelection::ready_registered(self.id(), context);
         Ok(())
     }
 }

@@ -304,15 +304,6 @@ impl FileSystemRoot {
             sha2::Sha256::digest(format!("{:?}", self.config).as_bytes())
         )
     }
-    pub(crate) fn display_for_physical(&self, path: &Path) -> String {
-        if self.config.authorized_roots.is_some() {
-            return path.to_string_lossy().into_owned();
-        }
-        match fs::canonicalize(&self.config.root) {
-            Ok(root) => self.display(&root, path),
-            Err(_) => path.to_string_lossy().into_owned(),
-        }
-    }
     pub(crate) fn resource(
         &self,
         raw: &str,

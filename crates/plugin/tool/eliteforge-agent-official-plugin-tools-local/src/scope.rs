@@ -69,14 +69,12 @@ pub struct LocalToolScopeRevision(pub String);
 pub struct ScopedLocalToolsPlugin {
     pty: Option<pty::PtyService>,
     provider: std::sync::Arc<dyn LocalToolScopeProvider>,
-    coordination: crate::coordination::CoordinationSelection,
 }
 
 impl ScopedLocalToolsPlugin {
     pub fn new(provider: std::sync::Arc<dyn LocalToolScopeProvider>) -> Self {
         Self {
             provider,
-            coordination: Default::default(),
             pty: None,
         }
     }
@@ -362,6 +360,8 @@ impl Plugin for ScopedLocalToolsPlugin {
         "framework.local.scoped.tools"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let coordination =
+            crate::coordination::CoordinationSelection::register(self.id(), context)?;
         let pty = self.pty.clone().unwrap_or_default();
         let cleanup_pty = pty.clone();
         context.on_cleanup(move || cleanup_pty.close());
@@ -382,7 +382,7 @@ impl Plugin for ScopedLocalToolsPlugin {
                 pty,
                 provider: self.provider.clone(),
                 tasks,
-                coordination: self.coordination.clone(),
+                coordination,
             },
         )
         .install(context)
@@ -392,7 +392,7 @@ impl Plugin for ScopedLocalToolsPlugin {
         &self,
         context: &mut eliteforge_agent_core::PluginReadyContext<'_>,
     ) -> Result<(), PluginError> {
-        self.coordination.ready(context);
+        crate::coordination::CoordinationSelection::ready_registered(self.id(), context);
         Ok(())
     }
 }

@@ -159,12 +159,38 @@ pub fn default_file_coordination() -> Arc<dyn FileCoordinationBackend> {
         .get_or_init(|| Arc::new(LocalFileCoordination::default()))
         .clone()
 }
+struct CoordinationRegistration {
+    provider: String,
+    selection: CoordinationSelection,
+}
 /// Resolved after every plugin has installed. Never falls back after selection.
 #[derive(Clone, Default)]
 pub(crate) struct CoordinationSelection(
     pub Arc<std::sync::OnceLock<Arc<dyn FileCoordinationBackend>>>,
 );
 impl CoordinationSelection {
+    pub fn register(
+        provider: &str,
+        context: &mut eliteforge_agent_core::PluginContext<'_>,
+    ) -> Result<Self, eliteforge_agent_core::PluginError> {
+        let selection = Self::default();
+        context.contribute(CoordinationRegistration {
+            provider: provider.into(),
+            selection: selection.clone(),
+        })?;
+        Ok(selection)
+    }
+    pub fn ready_registered(
+        provider: &str,
+        context: &eliteforge_agent_core::PluginReadyContext<'_>,
+    ) {
+        for registration in context.services().all::<CoordinationRegistration>() {
+            if registration.provider == provider {
+                registration.selection.ready(context);
+            }
+        }
+    }
+
     pub fn ready(&self, context: &eliteforge_agent_core::PluginReadyContext<'_>) {
         let backend = context
             .extension::<dyn FileCoordinationBackend>()

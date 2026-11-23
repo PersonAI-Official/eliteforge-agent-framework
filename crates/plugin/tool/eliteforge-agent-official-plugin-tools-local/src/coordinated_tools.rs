@@ -174,6 +174,9 @@ fn paths(
             )?,
         );
     }
+    if paths.len() > 32 {
+        return Err(fail("at most 32 affected paths per edit"));
+    }
     let mut keys = std::collections::BTreeSet::new();
     for resource in &paths {
         if !keys.insert(resource.physical_alias.clone()) {
@@ -329,15 +332,16 @@ impl Tool for FileTool {
                         .structured
                         .as_ref()
                         .ok_or_else(|| fail("read result lacks structured content"))?;
-                    let file = self
-                        .root
-                        .resolve(&resource.physical_alias_for_root(&self.root))?;
-                    let bytes = edits::read(&file.path, self.root.max_edit_bytes())?
-                        .ok_or_else(|| fail("file disappeared during read"))?;
-                    if data["version"].as_str() != Some(edits::version(&bytes).as_str()) {
-                        return Err(fail("file changed while returning read content"));
-                    }
-                    let total_lines = edits::text(&bytes)?.lines().count();
+                    // The reader already validated one stable snapshot. Record
+                    // precisely that result instead of reading/hash-computing it twice.
+                    let fingerprint = data["version"]
+                        .as_str()
+                        .ok_or_else(|| fail("read result lacks fingerprint"))?
+                        .to_owned();
+                    let total_lines = data["totalLines"]
+                        .as_u64()
+                        .ok_or_else(|| fail("read result lacks totalLines"))?
+                        as usize;
                     let start_line = data["startLine"].as_u64().unwrap_or(1) as usize;
                     let end_line = data["endLine"].as_u64().unwrap_or(0) as usize;
                     let text = data["content"].as_str().unwrap_or("").to_owned();
@@ -362,7 +366,7 @@ impl Tool for FileTool {
                                 resource: resource.clone(),
                                 subject: prepared.subject.clone(),
                                 authorization_revision: prepared.revision.clone(),
-                                fingerprint: edits::version(&bytes),
+                                fingerprint,
                                 total_lines,
                                 complete,
                                 fragments,
@@ -406,20 +410,24 @@ impl Tool for FileTool {
                 }
             };
             if !dry_run {
-                let observations =
-                    changed_observations(&self.root, &prepared, &changes, &arguments)?;
-                if let Err(error) = backend
-                    .publish(
-                        lease.as_ref(),
-                        FileEditOutcome {
-                            subject: prepared.subject.clone(),
-                            status: FileEditStatus::Applied,
-                            resources: prepared.resources.clone(),
-                            observations,
-                        },
-                    )
-                    .await
-                {
+                let publication =
+                    match changed_observations(&self.root, &prepared, &changes, &arguments) {
+                        Ok(observations) => {
+                            backend
+                                .publish(
+                                    lease.as_ref(),
+                                    FileEditOutcome {
+                                        subject: prepared.subject.clone(),
+                                        status: FileEditStatus::Applied,
+                                        resources: prepared.resources.clone(),
+                                        observations,
+                                    },
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                if let Err(error) = publication {
                     let _ = backend
                         .invalidate(FileInvalidation {
                             subject: Some(prepared.subject.clone()),
@@ -448,13 +456,7 @@ impl Tool for FileTool {
         }
     }
 }
-impl FileResource {
-    fn physical_alias_for_root(&self, root: &FileSystemRoot) -> String {
-        // root.display keeps atomic executors within their existing path policy.
-        let resolved = std::path::Path::new(&self.physical_alias);
-        root.display_for_physical(resolved)
-    }
-}
+
 fn edit(
     root: &FileSystemRoot,
     id: &str,
@@ -589,33 +591,48 @@ fn changed_observations(
     changes: &[Change],
     arguments: &Value,
 ) -> Result<Vec<FileObservation>, ToolError> {
+    let operations = arguments
+        .get("patch")
+        .and_then(Value::as_str)
+        .map(crate::text_patch::parse_text_patch)
+        .transpose()
+        .map_err(fail)?
+        .unwrap_or_default();
+    let cwd = root.resolve_directory(arguments.get("cwd").and_then(Value::as_str))?;
     let mut observations = Vec::new();
     for change in changes {
         let Some(after) = &change.after else {
             continue;
         };
         let resource = root.resource(&change.path)?;
-        let prior = prepared
-            .observations
-            .iter()
-            .find(|o| o.resource == resource);
+        let mut origin = resource.clone();
+        for operation in &operations {
+            if let crate::text_patch::FilePatch::Update {
+                path,
+                destination: Some(destination),
+                ..
+            } = operation
+            {
+                let target =
+                    root.resource(&root.display(&cwd.root, &cwd.path.join(destination)))?;
+                if target == resource {
+                    origin = root.resource(&root.display(&cwd.root, &cwd.path.join(path)))?;
+                }
+            }
+        }
+        let prior = prepared.observations.iter().find(|o| o.resource == origin);
+        let before = if origin == resource {
+            change.before.as_ref()
+        } else {
+            changes
+                .iter()
+                .find(|c| root.resource(&c.path).is_ok_and(|r| r == origin))
+                .and_then(|c| c.before.as_ref())
+        };
         let full = arguments["mode"] == "overwrite"
-            || change.before.is_none()
-            || (prepared.tool == "filesystem.write_text"
-                && prepared.observations.iter().any(|o| {
-                    o.resource == resource
-                        && o.complete
-                        && change
-                            .before
-                            .as_ref()
-                            .is_some_and(|b| o.fingerprint == edits::version(b))
-                }))
+            || (change.before.is_none() && origin == resource)
             || prior.is_some_and(|o| {
-                o.complete
-                    && change
-                        .before
-                        .as_ref()
-                        .is_some_and(|b| o.fingerprint == edits::version(b))
+                o.complete && before.is_some_and(|b| o.fingerprint == edits::version(b))
             });
         let text = edits::text(after)?;
         let total_lines = text.lines().count();
@@ -642,7 +659,11 @@ fn changed_observations(
                                 normalized[..offset].bytes().filter(|b| *b == b'\n').count() + 1;
                             Some(FileFragment {
                                 start_line,
-                                end_line: start_line + f.text.lines().count().saturating_sub(1),
+                                end_line: if f.end_line < f.start_line {
+                                    start_line.saturating_sub(1)
+                                } else {
+                                    start_line + f.end_line - f.start_line
+                                },
                                 text: f.text.clone(),
                             })
                         })
@@ -657,12 +678,22 @@ fn changed_observations(
                 if let Some(text) = arguments["newText"].as_str().filter(|s| !s.is_empty()) {
                     established.push(text.replace("\r\n", "\n"));
                 }
-            } else if let Some(patch) = arguments["patch"].as_str() {
-                for operation in crate::text_patch::parse_text_patch(patch).map_err(fail)? {
-                    if let crate::text_patch::FilePatch::Update { path, hunks, .. } = operation {
-                        let cwd =
-                            root.resolve_directory(arguments.get("cwd").and_then(Value::as_str))?;
-                        let raw = root.display(&cwd.root, &cwd.path.join(path));
+            } else if arguments["mode"] == "append" {
+                if let Some(text) = arguments["content"].as_str().filter(|s| !s.is_empty()) {
+                    established.push(text.replace("\r\n", "\n"));
+                }
+            } else {
+                for operation in &operations {
+                    if let crate::text_patch::FilePatch::Update {
+                        path,
+                        destination,
+                        hunks,
+                    } = operation
+                    {
+                        let raw = root.display(
+                            &cwd.root,
+                            &cwd.path.join(destination.as_ref().unwrap_or(path)),
+                        );
                         if root.resource(&raw)? == resource {
                             for hunk in hunks {
                                 if !hunk.after.is_empty() {
