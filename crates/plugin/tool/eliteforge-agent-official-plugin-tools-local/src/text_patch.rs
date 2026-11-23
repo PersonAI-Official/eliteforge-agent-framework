@@ -119,6 +119,8 @@ pub fn parse_text_patch(patch: &str) -> Result<Vec<FilePatch>, String> {
                 destination,
                 hunks,
             });
+        } else if header.starts_with("*** Move File:") {
+            return Err("invalid move header; use *** Update File: old/path followed by *** Move to: new/path".into());
         } else {
             return Err(format!("invalid patch header: {header}"));
         }

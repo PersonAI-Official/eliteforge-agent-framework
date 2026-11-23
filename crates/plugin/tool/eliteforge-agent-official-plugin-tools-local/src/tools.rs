@@ -162,13 +162,13 @@ fn write_text_descriptor() -> ToolDescriptor {
 }
 fn patch_descriptor() -> ToolDescriptor {
     ToolDescriptor::new("filesystem.apply_patch", "fs_apply_patch",
-        "Use mode=text for exact targeted replacements in one file; use mode=patch with a *** Begin Patch envelope for related multi-file add/update/delete/move operations. Read old text/context first. Unrelated concurrent edits are preserved when exact context still matches. Ambiguous contexts are rejected. dryRun only previews patch mode. No items wrapper or version fields.",
+        "Use mode=text for exact targeted replacements in one file; use mode=patch with a *** Begin Patch envelope for related multi-file add/update/delete/move operations. Read old text/context first. Unrelated concurrent edits are preserved when exact context still matches. Ambiguous contexts are rejected. replaceAll=true requires expectedCount equal to the exact match count. For a move use *** Update File: old/path followed by *** Move to: new/path. dryRun only previews patch mode. No items wrapper or version fields.",
         json!({"type":"object","oneOf":[
             {"type":"object","additionalProperties":false,"required":["mode","path","oldText","newText"],"properties":{
                 "mode":{"const":"text"},"path":{"type":"string","minLength":1},"oldText":{"type":"string","minLength":1},"newText":{"type":"string"},
-                "replaceAll":{"type":"boolean"},"expectedCount":{"type":"integer","minimum":1}}},
+                "replaceAll":{"type":"boolean","description":"Replace every exact match; true requires expectedCount."},"expectedCount":{"type":"integer","minimum":1,"description":"Expected exact match count; required when replaceAll is true."}},"allOf":[{"if":{"required":["replaceAll"],"properties":{"replaceAll":{"const":true}}},"then":{"required":["expectedCount"]}}]},
             {"type":"object","additionalProperties":false,"required":["mode","patch"],"properties":{
-                "mode":{"const":"patch"},"patch":{"type":"string","minLength":1,"maxLength":4194304},"cwd":{"type":"string","minLength":1},"dryRun":{"type":"boolean"}}}
+                "mode":{"const":"patch"},"patch":{"type":"string","minLength":1,"maxLength":4194304,"description":"For a move use *** Update File: old/path followed by *** Move to: new/path inside the patch envelope."},"cwd":{"type":"string","minLength":1},"dryRun":{"type":"boolean"}}}
         ]}))
         .with_display_resource(include_str!("tool-display.json"))
         .with_single_input()

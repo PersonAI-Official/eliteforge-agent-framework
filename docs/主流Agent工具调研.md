@@ -123,7 +123,7 @@ MCP 工具按服务器动态发现，资源工具按服务器声明生成，不�
 
 | 实现位置 | 已有工具 | 启用和边界 |
 | --- | --- | --- |
-| [tools-local](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tools.rs) | `fs_read_text`、`fs_list`、`fs_stat`、`search_grep`、`search_glob`、`search_path`、`fs_write_text`、`fs_apply_patch`、`fs_apply_unified_patch`、`command_exec`、`command_exec_read`、`command_exec_stop`、`command_exec_write`、`command_exec_list` | 读取、写入、命令分别显式启用；文件工具限制在配置的根目录，命令不由该根目录自动隔离 |
+| [tools-local](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tools.rs) | `fs_read_text`、`fs_list`、`fs_stat`、`search_grep`、`search_glob`、`search_path`、`fs_write_text`、`fs_apply_patch`、`command_exec`、`command_exec_read`、`command_exec_stop`、`command_exec_write`、`command_exec_list` | 读取、写入、命令分别显式启用；文件工具限制在配置的根目录，命令不由该根目录自动隔离 |
 | [tools-human](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-human/src/lib.rs) | `ask_user` | 1–3 个问题、每题 2–5 个选项，允许文本回答／跳过；返回 `AwaitInput`，宿主提交答案后恢复；没有多选或无选项提问 |
 | [tools-agents](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-agents/src/lib.rs) | `agent_spawn`、`thread_create`、`thread_send`、`thread_answer`、`thread_wait`、`thread_read`、`thread_list`、`thread_close` | 子 Agent 继承运行约束；默认 Thread registry 在进程内，不提供跨宿主团队或 Git worktree 隔离 |
 | [tools-mcp](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs) | 服务器发现的工具 | stdio／HTTP transport、工具分页、命名空间、取消及关闭；已接入资源列表、模板与读取；未提供 prompts API |

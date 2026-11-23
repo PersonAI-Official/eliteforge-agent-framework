@@ -195,6 +195,15 @@ impl Tool for FileTool {
         arguments: &Value,
         run: &RunContext,
     ) -> Result<Option<ToolPreparation>, ToolError> {
+        if self.descriptor.id == "filesystem.apply_patch"
+            && arguments["mode"] == "text"
+            && arguments["replaceAll"] == true
+            && arguments.get("expectedCount").is_none()
+        {
+            return Err(fail(
+                "notApplied: replaceAll=true requires expectedCount; inspect the exact matches and provide their count",
+            ));
+        }
         let validator =
             eliteforge_agent_core::compile_schema(&self.descriptor.input_schema).map_err(fail)?;
         if !validator.is_valid(arguments) {
@@ -304,9 +313,15 @@ impl Tool for FileTool {
         if prepared.tool != self.descriptor.id
             || prepared.arguments_hash != edits::version(arguments.to_string().as_bytes())
             || prepared.subject != subject(run)
-            || prepared.revision != revision(&self.root, run)
         {
-            return Err(fail("file preparation identity or authority changed"));
+            return Err(fail(
+                "notApplied: prepared invocation identity or arguments changed; issue a new tool call",
+            ));
+        }
+        if prepared.revision != revision(&self.root, run) {
+            return Err(fail(
+                "notApplied: filesystem authorization changed after preparation; check current access and issue a new tool call",
+            ));
         }
         let backend = self.root.coordination.backend()?;
         let lease = backend
@@ -320,7 +335,9 @@ impl Tool for FileTool {
                 .zip(&prepared.resources)
                 .any(|(a, b)| a.physical_alias != b.physical_alias)
         {
-            return Err(fail("file authority or resolved path changed"));
+            return Err(fail(
+                "notApplied: resolved path or filesystem authority changed after preparation; check the path and access, then issue a new call",
+            ));
         }
         let mut invocation = run.clone();
         invocation.extensions.insert(ActiveFileLease(lease.clone()));
@@ -529,6 +546,11 @@ fn edit(
         let count = source.matches(&old).count();
         let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
         let expected = args["expectedCount"].as_u64().map(|v| v as usize);
+        if replace_all && expected.is_none() {
+            return Err(fail(format!(
+                "notApplied: replaceAll requires expectedCount; found {count} exact matches in {path}; inspect the matches before retrying"
+            )));
+        }
         if count == 0
             || (!replace_all && count != 1)
             || (replace_all && expected != Some(count))

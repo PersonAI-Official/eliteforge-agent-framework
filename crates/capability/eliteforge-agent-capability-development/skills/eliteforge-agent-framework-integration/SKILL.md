@@ -2,7 +2,7 @@
 name: eliteforge-agent-framework-integration
 description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用、插件、工具与能力包。新建 Tron 能力包时先调用随技能提供的生成器创建完整骨架，再填写业务内容；提供模型、上下文、Skills、MCP、审批、持久化、流式输出教程，以及 Tron 菜单编码与导航校验。
 metadata:
-  version: 1.5.0
+  version: 1.5.1
 ---
 
 # EliteForge Agent Framework 使用手册

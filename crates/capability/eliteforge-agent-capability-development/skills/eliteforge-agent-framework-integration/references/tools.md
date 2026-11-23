@@ -28,7 +28,7 @@ let selection = AgentSelection {
 | `fs_apply_patch` | `mode: text` 配合 path/oldText/newText，或 `mode: patch` 配合 Begin Patch 内容 | status、受影响路径、diff 和冲突原因 |
 | `search_grep` / `search_glob` / `search_path` | 传查询及根内范围；有 nextCursor 可续页 | complete、limitReason、truncated |
 
-这是破坏性协议更新。不要调用 `fs_apply_unified_patch`，不要传 `expectedVersion`/`expectedVersions` 或旧 action/target 参数。text 模式要求非空 oldText，默认唯一精确匹配；多处替换必须同时给出 replaceAll=true 与准确 expectedCount。patch 模式可选 cwd/dryRun，不接受 text 模式参数。
+这是破坏性协议更新。不要调用 `fs_apply_unified_patch`，不要传 `expectedVersion`/`expectedVersions` 或旧 action/target 参数。text 模式要求非空 oldText，默认唯一精确匹配；多处替换必须同时给出 replaceAll=true 与准确 expectedCount。patch 模式可选 cwd/dryRun，不接受 text 模式参数；移动文件使用 `*** Update File: 旧路径` 加下一行 `*** Move to: 新路径`。授权或路径变化导致未执行时先核对当前状态，再发起新调用。
 
 ```json
 {"items":[{"path":"a.txt","content":"A","mode":"create"},{"path":"b.txt","content":"B","mode":"create"}]}
