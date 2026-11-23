@@ -1,5 +1,10 @@
 # 更新日志
 
+## [1.0.1] - 2026-11-24
+
+- `fs_apply_patch` 的 `mode=text` 冲突提示按实际参数区分：提供 `expectedCount` 但数量不符时，提示 expected/actual 计数并建议修正 `expectedCount` 或扩大上下文；未提供 `expectedCount` 时保留原有的“重新读取相关区域”提示。
+- 匹配次数与冲突守卫不变，`replaceAll=true` 缺少 `expectedCount` 的提示保持原样。
+
 ## [1.0.0] - 2026-11-23
 
 - 明确批量文本替换的匹配数量约束和文件移动语法，并改进未执行时的冲突与授权提示。

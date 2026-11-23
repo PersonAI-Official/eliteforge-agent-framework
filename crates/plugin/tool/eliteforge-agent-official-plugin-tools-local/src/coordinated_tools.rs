@@ -556,9 +556,15 @@ fn edit(
             || (replace_all && expected != Some(count))
             || expected.is_some_and(|e| e != count)
         {
-            return Err(fail(format!(
-                "context conflict in {path}: found {count} exact matches; re-read the relevant region"
-            )));
+            let conflict = match expected {
+                Some(expected) if expected != count => format!(
+                    "context conflict in {path}: expected {expected} exact matches but found {count}; set expectedCount to {count} or widen the context"
+                ),
+                _ => format!(
+                    "context conflict in {path}: found {count} exact matches; re-read the relevant region"
+                ),
+            };
+            return Err(fail(conflict));
         }
         let after = if replace_all {
             source.replace(&old, &new)
