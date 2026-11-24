@@ -530,7 +530,6 @@ fn edit(
         let before = edits::read(&resolved.path, root.max_edit_bytes())?
             .ok_or_else(|| fail("file does not exist"))?;
         prepared.require_current(root, path, &before, false)?;
-        prepared.require_seen(root, path, old)?;
         let source = edits::text(&before)?;
         let crlf = source.contains("\r\n") && !source.replace("\r\n", "").contains('\n');
         let old = if crlf {
@@ -544,6 +543,12 @@ fn edit(
             new.to_owned()
         };
         let count = source.matches(&old).count();
+        if count == 0 {
+            return Err(fail(format!(
+                "notApplied: no exact match for oldText in {path}; read the file to confirm its current content"
+            )));
+        }
+        prepared.require_seen(root, path, &old)?;
         let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
         let expected = args["expectedCount"].as_u64().map(|v| v as usize);
         if replace_all && expected.is_none() {
@@ -551,8 +556,7 @@ fn edit(
                 "notApplied: replaceAll requires expectedCount; found {count} exact matches in {path}; inspect the matches before retrying"
             )));
         }
-        if count == 0
-            || (!replace_all && count != 1)
+        if (!replace_all && count != 1)
             || (replace_all && expected != Some(count))
             || expected.is_some_and(|e| e != count)
         {
