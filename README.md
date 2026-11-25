@@ -1,7 +1,6 @@
-# eliteforge-agent-framework
+# EliteForge Agent Framework
 
-EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架。
-Framework 负责装配、执行和生命周期管理。能力包提供模型、工具、存储和可观测能力；上层应用提供 Harness，并负责认证、权限和业务流程。
+EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架。Framework 负责装配、执行和生命周期管理。能力包提供模型、工具、存储和可观测能力；上层应用提供 Harness，并负责认证、权限和业务流程。
 
 自动路由提供对话自动路由、向量自动路由、多模态向量自动路由、重排自动路由四类接口。宿主提供候选并安装路由实现；Framework 原样传递候选，不解释供应商标签或执行供应商筛选规则。供应商规则由对应能力包处理，宿主也可以自行实现路由。Framework 校验选中模型属于候选范围，并在调用时校验模型能力。
 
@@ -22,7 +21,6 @@ let agent = framework.agent(AgentSelection::default()).build().await?;
 
 插件全部属于 Framework。存储在同一 Framework 内唯一、自动共享；工具和 Skills 默认不授权，由 Agent 显式选择。关闭 Agent 只停止自己的执行，关闭 Framework 才释放插件。完整规则和多 Agent 示例见[Framework 共享装配](docs/Framework共享装配.md)。
 
-Rust 能力包只要编译进宿主，都是在进程内装配。
 运行后可以额外安装能力包。安装包声明 `backend` 且包含扩展实现、插件或页面时，会启动独立进程，通过 RPC 与 Framework 交互。
 
 运行时安装、签名、版本和加载机制见[动态能力包](docs/动态能力包运行时设计.md)；能力声明、配置工厂、共享实例和依赖规则见[能力包与自动装配](docs/能力包与统一装配.md)。
