@@ -82,7 +82,7 @@ interface ChatArtifacts {
 }
 ```
 
-- `actions` 是权威列表，只接受 `preview`、`open`、`reveal`、`save`；`actions[0]` 为主按钮，其余进入溢出菜单。缺省或空数组表示只展示、不显示按钮。
+- `actions` 是权威列表，只接受 `preview`、`open`、`reveal`、`save`；`actions[0]` 为主按钮，`actions[1]` 以内联次按钮显示，`actions[2..]` 进入溢出菜单。缺省或空数组表示只展示、不显示按钮。
 - `parseArtifacts` 对未知 `version`、非数组 `items` 和缺少 `id` / `display` 的条目返回 `null` 或丢弃条目，从不抛错；空 `items` 不渲染。协议版本 `v1` 与 npm 包版本无关。
 - 超过 `ARTIFACT_COLLAPSED_COUNT`（4）项时折叠。`states` 按条目 id 标记 `pending` / `failed`，失败时 UI 重试上次动作（缺省为主按钮）。
 - React/Vue adapter 实现 `artifactAction(session, { runId, itemId, action }, signal)` 执行 `open` / `reveal` / `save`，以及 `artifactContentUrl(session, { runId, itemId, disposition })` 返回 `inline` / `attachment` URL；仅在后端支持时声明 `supportsArtifacts`。运行时预览用 `inline` URL 打开新标签页，`onArtifactPreview` 可替换。

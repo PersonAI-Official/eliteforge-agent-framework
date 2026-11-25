@@ -30,7 +30,7 @@ Chat 与 A2UI 的框架包也重导出 MotionProvider 等动效 API，无需仅�
 当前基线 React 聊天示例：
 
 ```sh
-npm install --save-exact @personai/agent-ui-chat-react@1.0.0-preview.31 @personai/agent-ui-chat-core@1.0.0-preview.31
+npm install --save-exact @personai/agent-ui-chat-react@1.0.0-preview.34 @personai/agent-ui-chat-core@1.0.0-preview.34
 ```
 
 Vue 将 `chat-react` 换成 `chat-vue`；React Native 使用 `chat-react-native`（peer 为 `react`/`react-native`，无 CSS 入口）。需要完整全局主题时另装同版本 `chat-theme`；其他包按表选择。所有包都是 ESM，构建工具需要处理对应 CSS。
@@ -42,7 +42,7 @@ Vue 将 `chat-react` 换成 `chat-vue`；React Native 使用 `chat-react-native`
 核查版本、依赖与安装来源：
 
 ```sh
-npm view @personai/agent-ui-chat-react@1.0.0-preview.31 version peerDependencies exports --json --registry=https://registry.npmjs.org/
+npm view @personai/agent-ui-chat-react@1.0.0-preview.34 version peerDependencies exports --json --registry=https://registry.npmjs.org/
 npm ls --all
 ```
 
