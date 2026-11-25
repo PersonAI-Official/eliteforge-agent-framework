@@ -417,3 +417,38 @@ pub trait CommandProgressSink: Send + Sync {
     fn chunk(&self, run: &RunContext, stream: &str, text: &str);
 }
 pub struct CommandProgressSinkService(pub std::sync::Arc<dyn CommandProgressSink>);
+
+/// Command completions pending delivery within one Agent run.
+pub struct CommandCompletions {
+    session_id: String,
+    tasks: tokio::sync::Mutex<tokio::task::JoinSet<Option<serde_json::Value>>>,
+}
+
+impl CommandCompletions {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            tasks: Default::default(),
+        }
+    }
+
+    /// Collect ready completions, optionally waiting for the first pending task.
+    pub async fn drain(&self, wait: bool) -> Vec<serde_json::Value> {
+        let mut tasks = self.tasks.lock().await;
+        let mut completed = Vec::new();
+        while let Some(result) = tasks.try_join_next() {
+            if let Ok(Some(result)) = result {
+                completed.push(result);
+            }
+        }
+        if wait && completed.is_empty() {
+            while let Some(result) = tasks.join_next().await {
+                if let Ok(Some(result)) = result {
+                    completed.push(result);
+                    break;
+                }
+            }
+        }
+        completed
+    }
+}

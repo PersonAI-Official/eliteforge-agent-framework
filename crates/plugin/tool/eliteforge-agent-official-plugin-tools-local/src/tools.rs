@@ -214,7 +214,7 @@ fn system_command_task_read_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.task.read",
         "command_exec_read",
-        "Read a command task preview, including after process completion. Pass stdout.nextCursor/stderr.nextCursor as stdoutCursor/stderrCursor. hasMore means more captured bytes remain; captureStatus=eof means that stream reached EOF, not that the page contains everything. droppedBytes reports a gap from the requested cursor; discarded bytes cannot be recovered from memory. maxBytes is per stream (a UTF-8 scalar may exceed it by up to 3 bytes). A short waitMs can wait for more output. Tasks are available only in the session that started them.",
+        "Read a command task preview, including after process completion. Pass stdout.nextCursor/stderr.nextCursor as stdoutCursor/stderrCursor. hasMore means more captured bytes remain; captureStatus=eof means that stream reached EOF, not that the page contains everything. droppedBytes reports a gap from the requested cursor; discarded bytes cannot be recovered from memory. maxBytes is per stream (a UTF-8 scalar may exceed it by up to 3 bytes). Omit waitMs or pass 0 for an immediate snapshot. A positive waitMs collects output until the command exits or the wait window elapses. Tasks are available only in the session that started them.",
         json!({
             "type":"object", "additionalProperties":false, "required":["taskId"],
             "properties": {
@@ -764,19 +764,57 @@ impl Tool for SystemCommandTool {
                 task.wait_for_output(stdout_cursor, stderr_cursor, remaining)
                     .await;
             }
-            Ok::<(), ToolError>(())
+            Ok::<_, ToolError>((stdout_cursor, stderr_cursor))
         };
-        tokio::select! {
+        let (mut stdout_cursor, mut stderr_cursor) = tokio::select! {
             result = waiting => result?,
             _ = context.cancellation.cancelled() => {
                 task.request_stop();
                 task.wait_for_terminal(std::time::Duration::from_secs(3)).await;
                 return Err(ToolError::Failed("command was stopped because its Agent run was cancelled".into()));
             }
-        }
+        };
         let output = task.view(0, 0, INITIAL_READ_BYTES);
-        // Command status, stderr and a nonzero exit code are result data. The
-        // tool call itself succeeded once the task started and was observed.
+        let running = !output.progress().4;
+        let completions = context.extensions.get::<crate::CommandCompletions>()
+            .filter(|service| {
+                running && service.session_id == context.session_id
+                    && !input.interactive && !input.tty && !input.sudo
+            });
+        let mut output = serde_json::to_value(output)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        if completions.is_some() {
+            output["completionNotification"] = json!("registered");
+            output["followUp"] = json!("The runtime will deliver the exit result. Continue independent work or return control to the runtime. Read this task only if you need its logs now.");
+        }
+        if let Some(completions) = completions {
+            let mut run = context.clone();
+            run.extensions.remove::<crate::CommandCompletions>();
+            completions.tasks.lock().await.spawn(async move {
+                let progress = run.extensions.get::<crate::CommandProgressSinkService>();
+                loop {
+                    let page = task.view(stdout_cursor, stderr_cursor, INITIAL_READ_BYTES);
+                    let (stdout, stderr, next_stdout, next_stderr, terminal) = page.progress();
+                    if let Some(progress) = &progress {
+                        if !stdout.is_empty() {
+                            progress.0.chunk(&run, "stdout", stdout);
+                        }
+                        if !stderr.is_empty() {
+                            progress.0.chunk(&run, "stderr", stderr);
+                        }
+                    }
+                    stdout_cursor = next_stdout;
+                    stderr_cursor = next_stderr;
+                    if terminal {
+                        return task.completion_summary();
+                    }
+                    tokio::select! {
+                        _ = run.cancellation.cancelled() => return None,
+                        _ = task.wait_for_output(stdout_cursor, stderr_cursor, MAX_READ_WAIT) => {}
+                    }
+                }
+            });
+        }
         pending.accepted = true;
         json_output(output)
     }
@@ -811,12 +849,10 @@ impl Tool for SystemCommandTaskReadTool {
             .wait_ms
             .unwrap_or(0)
             .min(MAX_READ_WAIT.as_millis() as u64);
-        task.wait_for_output(
-            stdout_cursor,
-            stderr_cursor,
-            std::time::Duration::from_millis(wait_ms),
-        )
-        .await;
+        if wait_ms != 0 {
+            task.wait_for_terminal(std::time::Duration::from_millis(wait_ms))
+                .await;
+        }
         task.supply_sudo_password(context).await?;
         let output = task.view(
             stdout_cursor,

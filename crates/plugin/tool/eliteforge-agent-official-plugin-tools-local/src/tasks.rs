@@ -695,6 +695,21 @@ impl CommandTask {
             stdin_open: self.stdin_open(),
         }
     }
+
+    pub(crate) fn completion_summary(&self) -> Option<serde_json::Value> {
+        let tail_bytes = 2048;
+        let stdout = lock(&self.stdout).end_cursor.saturating_sub(tail_bytes);
+        let stderr = lock(&self.stderr).end_cursor.saturating_sub(tail_bytes);
+        let output = self.view(stdout, stderr, tail_bytes as usize);
+        Some(serde_json::json!({
+            "taskId": output.task_id,
+            "status": output.status,
+            "exitCode": output.exit_code,
+            "error": output.error,
+            "stdoutTail": output.stdout.content,
+            "stderrTail": output.stderr.content,
+        }))
+    }
 }
 
 impl Drop for CommandTask {
