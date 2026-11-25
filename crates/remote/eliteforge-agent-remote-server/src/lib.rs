@@ -660,7 +660,7 @@ async fn handle_socket(
         methods: service.methods(),
         product,
         events: "agui".into(),
-        features: vec!["binary".into()],
+        features: vec!["binary".into(), "fragment".into()],
     });
     let ready_plain = serde_json::to_vec(&ready).map_err(|e| RemoteError::Frame(e.to_string()))?;
     let ready_len = transport
@@ -676,27 +676,26 @@ async fn handle_socket(
     let writer_transport = transport.clone();
     let writer = tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
-        while let Some(frame) = out_rx.recv().await {
+        'writer: while let Some(frame) = out_rx.recv().await {
             let plain = match serde_json::to_vec(&frame) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            if plain.len() > 48 * 1024 {
-                continue;
-            }
-            let cipher_len = {
-                let mut transport = writer_transport.lock().await;
-                match transport.write_message(&plain, &mut buf) {
-                    Ok(value) => value,
-                    Err(_) => break,
+            for plain in outgoing_frames(&frame, plain) {
+                let cipher_len = {
+                    let mut transport = writer_transport.lock().await;
+                    match transport.write_message(&plain, &mut buf) {
+                        Ok(value) => value,
+                        Err(_) => break 'writer,
+                    }
+                };
+                if sender
+                    .send(Message::Binary(buf[..cipher_len].to_vec().into()))
+                    .await
+                    .is_err()
+                {
+                    break 'writer;
                 }
-            };
-            if sender
-                .send(Message::Binary(buf[..cipher_len].to_vec().into()))
-                .await
-                .is_err()
-            {
-                break;
             }
         }
     });
@@ -756,6 +755,48 @@ async fn handle_socket(
     }
     writer.abort();
     Ok(())
+}
+
+const MAX_REMOTE_FRAME_BYTES: usize = 48 * 1024;
+const MAX_REMOTE_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+fn outgoing_frames(frame: &WireFrame, plain: Vec<u8>) -> Vec<Vec<u8>> {
+    if plain.len() <= MAX_REMOTE_FRAME_BYTES {
+        return vec![plain];
+    }
+    let id = match frame {
+        WireFrame::RpcResult { id, .. }
+        | WireFrame::RpcEvent { id, .. }
+        | WireFrame::RpcError { id, .. } => *id,
+        _ => return Vec::new(),
+    };
+    if plain.len() > MAX_REMOTE_RESULT_BYTES {
+        return vec![json!({
+            "type": "rpc_error",
+            "id": id,
+            "code": "REMOTE_RESULT_TOO_LARGE",
+            "message": "Remote response exceeds the maximum result size"
+        }).to_string().into_bytes()];
+    }
+
+    let body = String::from_utf8(plain).expect("serde_json emits UTF-8");
+    // Leave room for JSON escaping and fragment envelope fields.
+    let chunk_bytes = (MAX_REMOTE_FRAME_BYTES - 256) / 6;
+    let mut remaining = body.as_str();
+    let mut chunks = Vec::new();
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(chunk_bytes);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&remaining[..end]);
+        remaining = &remaining[end..];
+    }
+    let total = chunks.len();
+    chunks.into_iter().enumerate().map(|(seq, data)| {
+        json!({"type": "fragment", "id": id, "seq": seq, "total": total, "data": data})
+            .to_string().into_bytes()
+    }).collect()
 }
 
 /// Upper bound for draining queued events after a streaming call returns.
